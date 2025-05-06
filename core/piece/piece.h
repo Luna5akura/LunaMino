@@ -21,7 +21,7 @@ typedef enum {
 
 typedef struct {
     PieceType type;    
-    int x, y;         // Left-top corner of the 4x4 shape in the board
+    int x, y;         // Left-top corner of the 4x4 shape in the board, global position starts from left-bottom corner of the board
     Rotation rotation;     // 0 is up, 1 is right, 2 is down, 3 is left
     int shape[4][4];  // 0 is empty, 1 is filled
 } Piece;

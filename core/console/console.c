@@ -45,6 +45,14 @@ void print_board(Game* game) {
         printf("--");
     }
     printf("+\n");
+
+    Previews* previews = game->state->previews;
+    printf("previews:");
+    for (int i = 0; i < previews->length; i++) {
+        PieceType type = previews->previews[( i + previews->current ) % previews->length];
+        printf("%c ", PRINT_TABLE[type]);
+    }
+    printf("\n");
 }
 
 void handle_input(Game* game) {

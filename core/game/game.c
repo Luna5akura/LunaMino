@@ -75,6 +75,7 @@ GameState* init_game_state(GameConfig* config) {
         previews->previews[i] = bag_next_piece(state->bag);
     }
     state->previews = previews;
+    return state;
 }
 
 Game* init_game() {
@@ -89,7 +90,7 @@ Game* init_game() {
     Board* board = init_board();
     game->board = board;
 
-    Piece* current_piece = init_piece(state->bag->sequence[config->preview_count]);
+    Piece* current_piece = init_piece(bag_next_piece(state->bag));
     current_piece->x = 3;
     current_piece->y = 21;
     current_piece->rotation = (Rotation)0;
@@ -124,7 +125,6 @@ void hard_drop(Piece* piece, Board* board) {
 
 void try_move_piece(Game* game, MoveAction action) {
     Piece* current_piece = game->current_piece;
-    printf("try_move_piece: %d, position: (%d, %d), rotation: %d\n", action, current_piece->x, current_piece->y, (int)current_piece->rotation);
     Board* board = game->board;
 
     // hard drop
@@ -142,7 +142,6 @@ void try_move_piece(Game* game, MoveAction action) {
     if (is_overlapping(board, current_piece)) {
         current_piece->x = original_x;
         current_piece->y = original_y;
-        printf("OVERLAPPING\n");
     }
 }  
 
@@ -152,7 +151,6 @@ Bool try_displace_piece(Game* game, const int direction[2]) {
     Board* board = game->board;
     int original_x = current_piece->x;
     int original_y = current_piece->y;
-
     displace_piece(current_piece, direction);
 
     if (is_overlapping(board, current_piece)) {
@@ -168,7 +166,7 @@ void try_rotate_piece_normal(Game* game, RotationAction action) {
     Rotation original_rotation = current_piece->rotation;
 
     int original_shape[4][4];
-    memcpy(current_piece->shape, original_shape, sizeof(current_piece->shape));
+    memcpy(original_shape, current_piece->shape, sizeof(current_piece->shape));
 
     rotate_piece(current_piece, action);
     // not I piece
@@ -176,28 +174,28 @@ void try_rotate_piece_normal(Game* game, RotationAction action) {
         for (int i = 0; i < 5; i++) {
             Bool is_successful = try_displace_piece(
                 game,
-                NORMAL_PIECE_NORMAL_SRS[(int)current_piece->rotation][(int)action][i]
+                NORMAL_PIECE_NORMAL_SRS[(int)original_rotation][(int)action][i]
             );
             if (is_successful) {
                 return;
             }
         }
         current_piece->rotation = original_rotation;
-        memcpy(original_shape, current_piece->shape, sizeof(current_piece->shape));
+        memcpy(current_piece->shape, original_shape, sizeof(current_piece->shape));
     }
     // I piece
     else {
         for (int i = 0; i < 5; i++) {
             Bool is_successful = try_displace_piece(
                 game, 
-                I_PIECE_NORMAL_SRS[(int)current_piece->rotation][(int)action][i]
+                I_PIECE_NORMAL_SRS[(int)original_rotation][(int)action][i]
             );
             if (is_successful) {
                 return;
             }
         }
         current_piece->rotation = original_rotation;
-        memcpy(original_shape, current_piece->shape, sizeof(current_piece->shape));
+        memcpy(current_piece->shape, original_shape, sizeof(current_piece->shape));
     }
 }
 
@@ -206,7 +204,7 @@ void try_rotate_piece_180(Game* game, RotationAction action) {
     Rotation original_rotation = current_piece->rotation;
 
     int original_shape[4][4];
-    memcpy(current_piece->shape, original_shape, sizeof(current_piece->shape));
+    memcpy(original_shape, current_piece->shape, sizeof(current_piece->shape));
 
     rotate_piece(current_piece, action);
     // not I piece
@@ -214,28 +212,28 @@ void try_rotate_piece_180(Game* game, RotationAction action) {
         for (int i = 0; i < 6; i++) {
             Bool is_successful = try_displace_piece(
                 game, 
-                NORMAL_PIECE_180_SRS[(int)current_piece->rotation][i]
+                NORMAL_PIECE_180_SRS[(int)original_rotation][i]
             );
             if (is_successful) {
                 return;
             }
         }
         current_piece->rotation = original_rotation;
-        memcpy(original_shape, current_piece->shape, sizeof(current_piece->shape));
+        memcpy(current_piece->shape, original_shape, sizeof(current_piece->shape));
     }
     // I piece
     else {
         for (int i = 0; i < 2; i++) {
             Bool is_successful = try_displace_piece(
                 game,
-                I_PIECE_180_SRS[(int)current_piece->rotation][i]
+                I_PIECE_180_SRS[(int)original_rotation][i]
             );
             if (is_successful) {
                 return;
             }
         }
         current_piece->rotation = original_rotation;
-        memcpy(original_shape, current_piece->shape, sizeof(current_piece->shape));
+        memcpy(current_piece->shape, original_shape, sizeof(current_piece->shape));
     }
 }
 
@@ -291,7 +289,15 @@ int clear_rows(Board* board) {
 void spawn_piece(Game* game) {
     Piece* current_piece = game->current_piece;
 
-    PieceType type = bag_next_piece(game->state->bag);
+    PieceType type;
+    if (game->config->preview_count == 0) {
+        type = bag_next_piece(game->state->bag);
+    }
+    else {
+        type = next_preview(game->state->previews, bag_next_piece(game->state->bag));
+    }
+    
+
     Piece* new_piece = init_piece(type);
     new_piece->x = 3;
     new_piece->y = 21;

@@ -13,7 +13,8 @@ Previews*  init_previews(int length) {
 }
 
 PieceType next_preview(Previews* previews, PieceType input) {
+    PieceType rtn = previews->previews[previews->current];
     previews->previews[previews->current] = input;
     previews->current = (previews->current + 1) % previews->length;
-    return previews->previews[previews->current];
+    return rtn;
 }

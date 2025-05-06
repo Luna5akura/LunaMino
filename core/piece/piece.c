@@ -262,7 +262,7 @@ void move_piece(Piece* piece, MoveAction action) {
 void displace_piece(Piece* piece, const int direction[2]) {
     // direction: positive x is right, positive y is up
     piece->x += direction[0];
-    piece->y -= direction[1]; // y starts from top, so we need to subtract
+    piece->y += direction[1];
 }
 
 void rotate_piece(Piece* piece, RotationAction action) {

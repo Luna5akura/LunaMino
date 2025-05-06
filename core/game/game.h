@@ -9,13 +9,6 @@
 #include "bag/bag.h"
 
 typedef struct {
-    GameConfig* config;
-    GameState* state;
-    Board* board;
-    Piece* current_piece;
-} Game;
-
-typedef struct {
     int preview_count;
 } GameConfig;
 
@@ -23,6 +16,12 @@ typedef struct {
     Bag* bag;
     Previews* previews;
 } GameState;
+typedef struct {
+    GameConfig* config;
+    GameState* state;
+    Board* board;
+    Piece* current_piece;
+} Game;
 
 Game* init_game();
 void try_move_piece(Game* game, MoveAction action);

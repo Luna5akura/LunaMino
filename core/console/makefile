@@ -6,7 +6,7 @@ INCLUDE = -I../board -I../game -I../piece -I../../util
 
 TARGET = tetris
 
-SOURCES = console.c ../board/board.c ../game/game.c ../piece/piece.c ../../util/util.c ../game/bag/bag.c
+SOURCES = console.c ../board/board.c ../game/game.c ../piece/piece.c ../../util/util.c ../game/bag/bag.c ../game/previews/previews.c
 
 OBJECTS = $(SOURCES:.c=.o)
 
