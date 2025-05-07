@@ -1,11 +1,15 @@
 // core/game/game.c
 
 #include "game.h"
-#include "../../util/util.h"
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
 
+#define GAME_FPS 60
+#define GAME_GRAVITY 1.0f / 60.0f
+
+#define GAME_PREVIEW_COUNT 5
+#define GAME_IS_HOLD_ENABLED TRUE
 
 const int NORMAL_PIECE_NORMAL_SRS[4][2][5][2] = {
     { // UP
@@ -59,14 +63,27 @@ const int I_PIECE_180_SRS[4][2][2] = {
     { {0, 0}, {-1, 0} }, // LEFT
 };
 
+GameUIConfig* init_game_ui_config() {
+    GameUIConfig* config = malloc(sizeof(GameUIConfig));
+    
+    config->fps = GAME_FPS;
+    config->gravity = GAME_GRAVITY;
+    
+    return config;
+}
+
 GameConfig* init_game_config() {
     GameConfig* config = malloc(sizeof(GameConfig));
-    config->preview_count = 5;
+    
+    config->preview_count = GAME_PREVIEW_COUNT;
+    config->is_hold_enabled = GAME_IS_HOLD_ENABLED;
+
     return config;
 }
 
 GameState* init_game_state(GameConfig* config) {
     GameState* state = malloc(sizeof(GameState));
+    
     state->bag = init_bag();
 
     Previews* previews = init_previews(config->preview_count);
@@ -75,11 +92,21 @@ GameState* init_game_state(GameConfig* config) {
         previews->previews[i] = bag_next_piece(state->bag);
     }
     state->previews = previews;
+    state->hold_piece = NULL;
+    
     return state;
 }
 
-Game* init_game() {
+Game* init_game(Bool is_ui_enabled) {
     Game* game = malloc(sizeof(Game));
+
+    if (is_ui_enabled) {
+        GameUIConfig* ui_config = init_game_ui_config();
+        game->ui_config = ui_config;
+    }
+    else {
+        game->ui_config = NULL;
+    }
 
     GameConfig* config = init_game_config();
     game->config = config;
@@ -95,8 +122,6 @@ Game* init_game() {
     current_piece->y = 21;
     current_piece->rotation = (Rotation)0;
     game->current_piece = current_piece;
-
-    
 
     return game;
 }
@@ -116,52 +141,62 @@ Bool is_overlapping(Board* board, Piece* piece) {
     return FALSE;
 }
 
-void hard_drop(Piece* piece, Board* board) {
+Bool hard_drop(Piece* piece, Board* board) {
+    // return: is_successful
+    piece->y--;
+    if (is_overlapping(board, piece)) {
+        piece->y++;
+        printf("false");
+        return FALSE;
+    }
     while (!is_overlapping(board, piece)) {
         piece->y--;
     }
     piece->y++;
+    return TRUE;
 }
 
-void try_move_piece(Game* game, MoveAction action) {
+Bool try_move_piece(Game* game, MoveAction action) {
+    // return: is_successful
     Piece* current_piece = game->current_piece;
     Board* board = game->board;
 
     // hard drop
     if (action == MOVE_HARD_DROP) {
-        hard_drop(current_piece, board);
-        return;
+        Bool rtn = hard_drop(current_piece, board);
+        return rtn;
     }
 
     // not hard drop
     int original_x = current_piece->x;
     int original_y = current_piece->y;
-
     move_piece(current_piece, action);
 
-    if (is_overlapping(board, current_piece)) {
-        current_piece->x = original_x;
-        current_piece->y = original_y;
-    }
+    if (!is_overlapping(board, current_piece)) return TRUE;
+    
+    current_piece->x = original_x;
+    current_piece->y = original_y;
+    return FALSE;
 }  
 
 
 Bool try_displace_piece(Game* game, const int direction[2]) {
+    // return: is_successful
     Piece* current_piece = game->current_piece;
     Board* board = game->board;
     int original_x = current_piece->x;
     int original_y = current_piece->y;
     displace_piece(current_piece, direction);
 
-    if (is_overlapping(board, current_piece)) {
-        current_piece->x = original_x;
-        current_piece->y = original_y;
-        return FALSE;
-    }
-    return TRUE;
+    if (!is_overlapping(board, current_piece)) return TRUE;
+    
+    current_piece->x = original_x;
+    current_piece->y = original_y;
+    return FALSE;
 }
 
-void try_rotate_piece_normal(Game* game, RotationAction action) {
+Bool try_rotate_piece_normal(Game* game, RotationAction action) {
+    // return: is_successful
     Piece* current_piece = game->current_piece;
     Rotation original_rotation = current_piece->rotation;
 
@@ -176,9 +211,7 @@ void try_rotate_piece_normal(Game* game, RotationAction action) {
                 game,
                 NORMAL_PIECE_NORMAL_SRS[(int)original_rotation][(int)action][i]
             );
-            if (is_successful) {
-                return;
-            }
+            if (is_successful) return TRUE;
         }
         current_piece->rotation = original_rotation;
         memcpy(current_piece->shape, original_shape, sizeof(current_piece->shape));
@@ -190,16 +223,16 @@ void try_rotate_piece_normal(Game* game, RotationAction action) {
                 game, 
                 I_PIECE_NORMAL_SRS[(int)original_rotation][(int)action][i]
             );
-            if (is_successful) {
-                return;
-            }
+            if (is_successful) return TRUE;
         }
         current_piece->rotation = original_rotation;
         memcpy(current_piece->shape, original_shape, sizeof(current_piece->shape));
     }
+    return FALSE;
 }
 
-void try_rotate_piece_180(Game* game, RotationAction action) {
+Bool try_rotate_piece_180(Game* game, RotationAction action) {
+    // return: is_successful
     Piece* current_piece = game->current_piece;
     Rotation original_rotation = current_piece->rotation;
 
@@ -214,9 +247,7 @@ void try_rotate_piece_180(Game* game, RotationAction action) {
                 game, 
                 NORMAL_PIECE_180_SRS[(int)original_rotation][i]
             );
-            if (is_successful) {
-                return;
-            }
+            if (is_successful) return TRUE;
         }
         current_piece->rotation = original_rotation;
         memcpy(current_piece->shape, original_shape, sizeof(current_piece->shape));
@@ -228,37 +259,45 @@ void try_rotate_piece_180(Game* game, RotationAction action) {
                 game,
                 I_PIECE_180_SRS[(int)original_rotation][i]
             );
-            if (is_successful) {
-                return;
-            }
+            if (is_successful) return TRUE;
         }
         current_piece->rotation = original_rotation;
         memcpy(current_piece->shape, original_shape, sizeof(current_piece->shape));
     }
+    return FALSE;
 }
 
-void try_rotate_piece(Game* game, RotationAction action) {
+Bool try_rotate_piece(Game* game, RotationAction action) {
+    // return: is_successful
+    Bool rtn;
     if (action == ROTATE_180) {
-        try_rotate_piece_180(game, action);
+        rtn = try_rotate_piece_180(game, action);
     }
     else {
-        try_rotate_piece_normal(game, action);
+        rtn = try_rotate_piece_normal(game, action);
     }
+    return rtn;
 }
 
-void lock_piece(Game* game) {
+Bool lock_piece(Game* game) {
+    // return: is_game_over
     Board* board = game->board;
     Piece* current_piece = game->current_piece;
+
+    Bool rtn = TRUE;
     for (int i = 0; i < 4; i++) {
         for (int j = 0; j < 4; j++) {
             if (current_piece->shape[i][j] == 0) continue;
 
             int x = current_piece->x + j;
             int y = current_piece->y - i;
+
+            if (y < 20) rtn = FALSE;
             
             board->state[x][y] = (int)current_piece->type + 1;
         }
     }
+    return rtn;
 }
 
 int clear_rows(Board* board) {
@@ -271,22 +310,23 @@ int clear_rows(Board* board) {
                 break;
             }
         }
-        if (is_row_full) {
-            num_rows_cleared++;
-            for (int yy = y; yy <= board->height - 1; yy++) {
-                for (int x = 0; x < board->width; x++) {
-                    board->state[x][yy] = board->state[x][yy + 1];
-                }
-            }
+        if (!is_row_full) continue;
+
+        num_rows_cleared++;
+        for (int yy = y; yy <= board->height - 1; yy++) {
             for (int x = 0; x < board->width; x++) {
-                board->state[x][board->height - 1] = 0;
+                board->state[x][yy] = board->state[x][yy + 1];
             }
+        }
+        for (int x = 0; x < board->width; x++) {
+            board->state[x][board->height - 1] = 0;
         }
     }
     return num_rows_cleared;
 }
 
-void spawn_piece(Game* game) {
+Bool spawn_piece(Game* game) {
+    // return: is_game_over
     Piece* current_piece = game->current_piece;
 
     PieceType type;
@@ -303,9 +343,15 @@ void spawn_piece(Game* game) {
     new_piece->y = 21;
     game->current_piece = new_piece;
     free(current_piece);
+
+    if (is_overlapping(game->board, new_piece)) return TRUE;
+
+    return FALSE;
 }
 
-void next_piece(Game* game) {
-    lock_piece(game);
-    spawn_piece(game);
+Bool next_piece(Game* game) {
+    Bool rtn; // is_game_over
+    rtn = lock_piece(game);
+    rtn = rtn || spawn_piece(game);
+    return rtn;
 }

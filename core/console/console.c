@@ -95,7 +95,7 @@ void handle_input(Game* game) {
 
 int main() {
     srandom(0);
-    Game* game = init_game();
+    Game* game = init_game(FALSE);
 
     printf("Tetris Console Test\n");
     printf("Controls: a (left), d (right), s (down), w (hard drop), q (rotate CW), e (rotate CCW), r (rotate 180), n (next piece), x (exit)\n");

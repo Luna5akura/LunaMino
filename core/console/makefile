@@ -19,6 +19,7 @@ $(TARGET): $(OBJECTS)
 	$(CC) $(CFLAGS) $(INCLUDE) -c $< -o $@
 
 clean:
+	@echo "Cleaning object files and $(TARGET)..."
 	rm -f $(OBJECTS) $(TARGET)
 
 .PHONY: all clean
