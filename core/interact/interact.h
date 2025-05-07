@@ -6,14 +6,33 @@
 #include "../core/game/game.h"
 
 typedef struct {
-    float drop_interval;
     int width;
     int height;
     int block_size;
+    Bool is_shadow_enabled;
+
+    int fps;
+    float gravity; // block per frame
+    float das; // ms
+    float arr; // ms
+    float soft_drop_gravity; // block per frame
+    float drop_interval;
+    float soft_drop_interval;
+    float lock_delay; // ms
+    int reset_lock_times_limit;
 } TetrisConfig;
 
 typedef struct {
     float drop_timer;
+    float das_timer;
+    float arr_timer;
+    float soft_drop_timer;
+    float lock_timer;
+    int lock_times_left;
+    Bool is_left_pressed;
+    Bool is_right_pressed;
+    Bool is_soft_drop_pressed;
+    Bool is_grounded;
     Bool is_game_over;
 } TetrisState;
 

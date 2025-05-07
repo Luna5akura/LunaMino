@@ -5,11 +5,9 @@
 #include <string.h>
 #include <stdio.h>
 
-#define GAME_FPS 60
-#define GAME_GRAVITY 1.0f / 60.0f
-
 #define GAME_PREVIEW_COUNT 5
 #define GAME_IS_HOLD_ENABLED TRUE
+#define GAME_SEED 0
 
 const int NORMAL_PIECE_NORMAL_SRS[4][2][5][2] = {
     { // UP
@@ -63,20 +61,14 @@ const int I_PIECE_180_SRS[4][2][2] = {
     { {0, 0}, {-1, 0} }, // LEFT
 };
 
-GameUIConfig* init_game_ui_config() {
-    GameUIConfig* config = malloc(sizeof(GameUIConfig));
-    
-    config->fps = GAME_FPS;
-    config->gravity = GAME_GRAVITY;
-    
-    return config;
-}
 
 GameConfig* init_game_config() {
     GameConfig* config = malloc(sizeof(GameConfig));
     
     config->preview_count = GAME_PREVIEW_COUNT;
     config->is_hold_enabled = GAME_IS_HOLD_ENABLED;
+    config->seed = GAME_SEED;
+    srandom(config->seed);
 
     return config;
 }
@@ -98,16 +90,8 @@ GameState* init_game_state(GameConfig* config) {
     return state;
 }
 
-Game* init_game(Bool is_ui_enabled) {
+Game* init_game() {
     Game* game = malloc(sizeof(Game));
-
-    if (is_ui_enabled) {
-        GameUIConfig* ui_config = init_game_ui_config();
-        game->ui_config = ui_config;
-    }
-    else {
-        game->ui_config = NULL;
-    }
 
     GameConfig* config = init_game_config();
     game->config = config;
@@ -325,7 +309,7 @@ int clear_rows(Board* board) {
     return num_rows_cleared;
 }
 
-Bool spawn_piece(Game* game, Bool is_free_needed) {
+Bool spawn_piece(Game* game) {
     // return: is_game_over
     Piece* current_piece = game->current_piece;
 
@@ -343,7 +327,7 @@ Bool spawn_piece(Game* game, Bool is_free_needed) {
     new_piece->y = 21;
     game->current_piece = new_piece;
     
-    if (is_free_needed) free(current_piece);
+    free(current_piece);
 
     game->state->can_hold_piece = TRUE;
 
@@ -355,23 +339,26 @@ Bool spawn_piece(Game* game, Bool is_free_needed) {
 Bool next_piece(Game* game) {
     Bool rtn; // is_game_over
     rtn = lock_piece(game);
-    rtn = rtn || spawn_piece(game, TRUE);
+    rtn = rtn || spawn_piece(game);
     return rtn;
 }
 
 Bool hold_piece(Game* game) {
     // return: is_game_over
-    Piece* current_piece = game->current_piece;
+    PieceType current_piece_type = game->current_piece->type;
 
     if (game->state->hold_piece == NULL) {
-        game->state->hold_piece = current_piece;
-        Bool is_game_over = spawn_piece(game, FALSE);
+        Bool is_game_over = spawn_piece(game);
+        game->state->hold_piece = init_piece(current_piece_type);
+
         game->state->can_hold_piece = FALSE;
         return is_game_over;
     }
     else {
         Piece* hold_piece = game->state->hold_piece;
-        game->state->hold_piece = current_piece;
+        free(game->current_piece);
+        game->state->hold_piece = init_piece(current_piece_type);
+
         Piece* new_piece = init_piece(hold_piece->type);
         new_piece->x = 3;
         new_piece->y = 21;
@@ -393,4 +380,30 @@ Bool try_hold_piece(Game* game) {
     if (!game->config->is_hold_enabled) return FALSE;
     if (!game->state->can_hold_piece) return FALSE;
     return hold_piece(game);
+}
+
+// Not core functions
+
+Bool is_grounded(Game* game) {
+    Piece* current_piece = game->current_piece;
+    
+    current_piece->y--;
+    Bool rtn = is_overlapping(game->board, current_piece);
+    current_piece->y++;
+
+    return rtn;
+}
+
+int get_shadow_height(Game* game) {
+    Piece* current_piece = game->current_piece;
+
+    int shadow_height = -1;
+    int original_y = current_piece->y;
+    while (!is_overlapping(game->board, current_piece)) {
+        current_piece->y--;
+        shadow_height++;
+    }
+    current_piece->y = original_y;
+    
+    return shadow_height;
 }

@@ -6,3 +6,4 @@ typedef enum {
 } Bool;
 
 long int random();
+void srandom(unsigned int seed);

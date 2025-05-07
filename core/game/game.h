@@ -3,22 +3,16 @@
 #ifndef GAME_H
 #define GAME_H
 
+#include "../../util/util.h"
 #include "../piece/piece.h"
 #include "../board/board.h"
 #include "previews/previews.h"
 #include "bag/bag.h"
-#include "../../util/util.h"
-
-typedef struct {
-    int fps;
-    float gravity;
-    int das;
-    int arr;
-} GameUIConfig;
 
 typedef struct {
     int preview_count;
     Bool is_hold_enabled;
+    int seed;
 } GameConfig;
 
 typedef struct {
@@ -28,18 +22,19 @@ typedef struct {
     Bool can_hold_piece;
 } GameState;
 typedef struct {
-    GameUIConfig* ui_config;
     GameConfig* config;
     GameState* state;
     Board* board;
     Piece* current_piece;
 } Game;
 
-Game* init_game(Bool is_ui_enabled);
+Game* init_game();
 Bool try_move_piece(Game* game, MoveAction action);
 Bool try_rotate_piece(Game* game, RotationAction action);
 int clear_rows(Board* board);
 Bool next_piece(Game* game);
 Bool try_hold_piece(Game* game);
+Bool is_grounded(Game* game);
+int get_shadow_height(Game* game);
 
 #endif
