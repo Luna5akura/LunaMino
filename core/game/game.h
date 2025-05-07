@@ -12,6 +12,8 @@
 typedef struct {
     int fps;
     float gravity;
+    int das;
+    int arr;
 } GameUIConfig;
 
 typedef struct {
@@ -22,7 +24,8 @@ typedef struct {
 typedef struct {
     Bag* bag;
     Previews* previews;
-    PieceType hold_piece;
+    Piece* hold_piece;
+    Bool can_hold_piece;
 } GameState;
 typedef struct {
     GameUIConfig* ui_config;
@@ -37,5 +40,6 @@ Bool try_move_piece(Game* game, MoveAction action);
 Bool try_rotate_piece(Game* game, RotationAction action);
 int clear_rows(Board* board);
 Bool next_piece(Game* game);
+Bool try_hold_piece(Game* game);
 
 #endif

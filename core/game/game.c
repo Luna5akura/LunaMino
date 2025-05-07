@@ -93,7 +93,8 @@ GameState* init_game_state(GameConfig* config) {
     }
     state->previews = previews;
     state->hold_piece = NULL;
-    
+    state->can_hold_piece = TRUE;
+
     return state;
 }
 
@@ -146,7 +147,6 @@ Bool hard_drop(Piece* piece, Board* board) {
     piece->y--;
     if (is_overlapping(board, piece)) {
         piece->y++;
-        printf("false");
         return FALSE;
     }
     while (!is_overlapping(board, piece)) {
@@ -325,7 +325,7 @@ int clear_rows(Board* board) {
     return num_rows_cleared;
 }
 
-Bool spawn_piece(Game* game) {
+Bool spawn_piece(Game* game, Bool is_free_needed) {
     // return: is_game_over
     Piece* current_piece = game->current_piece;
 
@@ -342,7 +342,10 @@ Bool spawn_piece(Game* game) {
     new_piece->x = 3;
     new_piece->y = 21;
     game->current_piece = new_piece;
-    free(current_piece);
+    
+    if (is_free_needed) free(current_piece);
+
+    game->state->can_hold_piece = TRUE;
 
     if (is_overlapping(game->board, new_piece)) return TRUE;
 
@@ -352,6 +355,42 @@ Bool spawn_piece(Game* game) {
 Bool next_piece(Game* game) {
     Bool rtn; // is_game_over
     rtn = lock_piece(game);
-    rtn = rtn || spawn_piece(game);
+    rtn = rtn || spawn_piece(game, TRUE);
     return rtn;
+}
+
+Bool hold_piece(Game* game) {
+    // return: is_game_over
+    Piece* current_piece = game->current_piece;
+
+    if (game->state->hold_piece == NULL) {
+        game->state->hold_piece = current_piece;
+        Bool is_game_over = spawn_piece(game, FALSE);
+        game->state->can_hold_piece = FALSE;
+        return is_game_over;
+    }
+    else {
+        Piece* hold_piece = game->state->hold_piece;
+        game->state->hold_piece = current_piece;
+        Piece* new_piece = init_piece(hold_piece->type);
+        new_piece->x = 3;
+        new_piece->y = 21;
+        new_piece->rotation = (Rotation)0;
+        memcpy(new_piece->shape, hold_piece->shape, sizeof(hold_piece->shape));
+
+        free(hold_piece);
+        game->current_piece = new_piece;
+
+        if (is_overlapping(game->board, new_piece)) return TRUE;
+
+        game->state->can_hold_piece = FALSE;
+        return FALSE;
+    }
+}
+
+Bool try_hold_piece(Game* game) {
+    // return: is_game_over
+    if (!game->config->is_hold_enabled) return FALSE;
+    if (!game->state->can_hold_piece) return FALSE;
+    return hold_piece(game);
 }
