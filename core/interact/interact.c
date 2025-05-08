@@ -208,6 +208,11 @@ void update_drop_timer(Tetris* tetris) {
     }
 }
 
+void restart_game(Tetris* tetris) {
+    Game *game = init_game(TRUE);
+    tetris = init_tetris(game);
+}
+
 void detect_input(Tetris* tetris) {
     Game* game = tetris->game;
 
@@ -308,6 +313,9 @@ void detect_input(Tetris* tetris) {
         tetris->state->is_update_clear_rows_needed = TRUE;
         tetris->state->is_grounded = FALSE;
         reset_lock_times_left(tetris);
+    }
+    if (IsKeyPressed(KEY_R)) {
+        restart_game(tetris);
     }
 }
 
@@ -566,7 +574,8 @@ void draw_debug_info(Tetris* tetris) {
         "attack_type: %i\n"
         "is_pc: %i\n"
         "current_piece->x: %i\n"
-        "current_piece->y: %i\n",
+        "current_piece->y: %i\n"
+        "is_last_rotate: %i\n",
         tetris->state->drop_timer,
         tetris->state->das_timer,
         tetris->state->arr_timer,
@@ -581,7 +590,8 @@ void draw_debug_info(Tetris* tetris) {
         tetris->state->attack_type,
         tetris->state->is_pc,
         tetris->game->current_piece->x,
-        tetris->game->current_piece->y
+        tetris->game->current_piece->y,
+        tetris->game->state->is_last_rotate
     );
 
     DrawText(
@@ -700,9 +710,7 @@ void run_game(Game* game) {
     }
 }
 
-int main() {
-    Game* game = init_game(TRUE);
-    run_game(game);
+void free_game(Game* game) {
     
     free(game->current_piece);
     free(game->state->previews);
@@ -712,6 +720,13 @@ int main() {
     free(game->board);
     free(game);
     CloseWindow();
+
+}
+
+int main() {
+    Game* game = init_game(TRUE);
+    run_game(game);
+    free_game(game);
 
     return 0;
 }

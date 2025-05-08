@@ -152,6 +152,8 @@ Bool try_move_piece(Game* game, MoveAction action) {
     // hard drop
     if (action == MOVE_HARD_DROP) {
         Bool rtn = hard_drop(current_piece, board);
+        if (rtn) game->state->is_last_rotate = 0;
+        printf("hard drop: %d\n", rtn);
         return rtn;
     }
 
@@ -161,9 +163,7 @@ Bool try_move_piece(Game* game, MoveAction action) {
     move_piece(current_piece, action);
 
     if (!is_overlapping(board, current_piece)) {
-        if (action == MOVE_LEFT || action == MOVE_RIGHT) {
-            game->state->is_last_rotate = 0;
-        }
+        game->state->is_last_rotate = 0;
         return TRUE;
     }
     
@@ -498,6 +498,8 @@ Bool is_current_piece_movable(Game* game) {
     for (int i = 0; i < 4; i++) {
         current_piece->x = original_x + directions[i][0];
         current_piece->y = original_y + directions[i][1];
+        printf("try move: %d, %d\n", current_piece->x, current_piece->y);
+        printf("is_overlapping: %d\n", is_overlapping(game->board, current_piece));
         if (!is_overlapping(game->board, current_piece)) {
             current_piece->x = original_x;
             current_piece->y = original_y;
@@ -522,13 +524,14 @@ AttackType get_none_spin_attack_type(int num_rows_cleared) {
 
 AttackType get_t_attack_type(Game* game, int num_rows_cleared) {
     if (
-        (
-            game->state->is_last_rotate == 0
-            || !is_t_triple_corner(game)
+        game->state->is_last_rotate == 0
+        || (
+            !is_t_triple_corner(game)
+            // mini+
+            && is_current_piece_movable(game)
         )
-        // mini+
-        && !is_current_piece_movable(game)
     ) return get_none_spin_attack_type(num_rows_cleared);
+    printf("game->state->is_last_rotate: %d\n");
     if (is_t_rect_has_hole(game) && game->state->is_last_rotate != 5) {
         // mini
         switch (num_rows_cleared) {
