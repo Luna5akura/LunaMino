@@ -354,7 +354,7 @@ void update_ren(Game* game) {
 
 int clear_rows(Board* board) {
     int num_rows_cleared = 0;
-    for (int y = board->height - 1; y >= 0; y--) {
+    for (int y = board->height; y >= 0; y--) {
         Bool is_row_full = TRUE;
         for (int x = 0; x < board->width; x++) {
             if (board->state[x][y] == 0) {

@@ -307,11 +307,15 @@ void detect_input(Tetris* tetris) {
     if (IsKeyPressed(KEY_A)) try_rotate_piece(game, ROTATE_180);
     if (IsKeyPressed(KEY_C)) {
         tetris->state->is_game_over = try_hold_piece(game);
+        tetris->state->drop_timer = 0.0f;
+        tetris->state->is_grounded = FALSE;
+        reset_lock_times_left(tetris);
     };
     if (IsKeyPressed(KEY_SPACE)) {
         try_move_piece(game, MOVE_HARD_DROP);
         tetris->state->is_update_clear_rows_needed = TRUE;
         tetris->state->is_grounded = FALSE;
+        tetris->state->drop_timer = 0.0f;
         reset_lock_times_left(tetris);
     }
     if (IsKeyPressed(KEY_R)) {
