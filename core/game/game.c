@@ -148,7 +148,6 @@ Bool try_move_piece(Game* game, MoveAction action) {
     Piece* current_piece = game->current_piece;
     Board* board = game->board;
 
-    game->state->is_last_rotate = 0;
 
     // hard drop
     if (action == MOVE_HARD_DROP) {
@@ -161,7 +160,12 @@ Bool try_move_piece(Game* game, MoveAction action) {
     int original_y = current_piece->y;
     move_piece(current_piece, action);
 
-    if (!is_overlapping(board, current_piece)) return TRUE;
+    if (!is_overlapping(board, current_piece)) {
+        if (action == MOVE_LEFT || action == MOVE_RIGHT) {
+            game->state->is_last_rotate = 0;
+        }
+        return TRUE;
+    }
     
     current_piece->x = original_x;
     current_piece->y = original_y;
@@ -301,17 +305,6 @@ Bool lock_piece(Game* game) {
     return rtn;
 }
 
-void update_ren(Game* game) {
-    // before lock_piece
-    int num_rows_cleared = detect_clear_rows(game);
-    if (num_rows_cleared == 0) {
-        game->state->ren = -1;
-    }
-    else {
-        game->state->ren += 1;
-    }
-}
-
 int detect_clear_rows(Game* game) {
     // before lock_piece
     Board* board = game->board;
@@ -345,54 +338,19 @@ int detect_clear_rows(Game* game) {
         num_rows_cleared++;
     }
 
-    free(temp_board);
     return num_rows_cleared;
 }
 
-
-int** simulation_clear_rows(Game* game) {
+void update_ren(Game* game) {
     // before lock_piece
-    // return: int board[10][23]
-    Board* board = game->board;
-    Piece* current_piece = game->current_piece;
-
-    int num_rows_cleared = 0;
-    int temp_board[10][23];
-    memcpy(temp_board, board->state, sizeof(board->state));
-
-    for (int i = 0; i < 4; i++) {
-        for (int j = 0; j < 4; j++) {
-            if (current_piece->shape[i][j] == 0) continue;
-
-            int x = current_piece->x + j;
-            int y = current_piece->y - i;
-            
-            temp_board[x][y] = (int)current_piece->type + 1;
-        }
-    }    
-
-    for (int y = board->height - 1; y >= 0; y--) {
-        Bool is_row_full = TRUE;
-        for (int x = 0; x < board->width; x++) {
-            if (temp_board[x][y] == 0) {
-                is_row_full = FALSE;
-                break;
-            }
-        }
-        if (!is_row_full) continue;
-
-        for (int yy = y; yy <= board->height - 1; yy++) {
-            for (int x = 0; x < board->width; x++) {
-                temp_board[x][yy] = temp_board[x][yy + 1];
-            }
-        }
-        for (int x = 0; x < board->width; x++) {
-            temp_board[x][board->height - 1] = 0;
-        }
+    int num_rows_cleared = detect_clear_rows(game);
+    if (num_rows_cleared == 0) {
+        game->state->ren = -1;
     }
-    return temp_board;
+    else {
+        game->state->ren += 1;
+    }
 }
-
 
 int clear_rows(Board* board) {
     int num_rows_cleared = 0;
@@ -504,7 +462,7 @@ Bool is_t_triple_corner(Game* game) {
         int y = current_piece->y - corners[i][1];
         if (
             game->board->state[x][y] != 0
-            ||x < 0
+            || x < 0
             || x >= game->board->width
             || y < 0
         ) count++;
@@ -522,8 +480,8 @@ Bool is_t_rect_has_hole(Game* game) {
     };
     int count = 0;
     for (int i = 0; i < 2; i++) {
-        int x = current_piece->x + rects[(int)current_piece->rotation][i][0];
-        int y = current_piece->y - rects[(int)current_piece->rotation][i][1];
+        int x = current_piece->x + rects[(int)current_piece->rotation][i][1];
+        int y = current_piece->y - rects[(int)current_piece->rotation][i][0];
         if (game->board->state[x][y] != 0) count++;
     }
     return count == 1;
@@ -540,7 +498,11 @@ Bool is_current_piece_movable(Game* game) {
     for (int i = 0; i < 4; i++) {
         current_piece->x = original_x + directions[i][0];
         current_piece->y = original_y + directions[i][1];
-        if (!is_overlapping(game->board, current_piece)) return TRUE;
+        if (!is_overlapping(game->board, current_piece)) {
+            current_piece->x = original_x;
+            current_piece->y = original_y;
+            return TRUE;
+        }
     }
     current_piece->x = original_x;
     current_piece->y = original_y;
@@ -558,29 +520,14 @@ AttackType get_none_spin_attack_type(int num_rows_cleared) {
     }
 }
 
-AttackType get_attack_type(Game* game) {
-    // before lock_piece
-    Piece* current_piece = game->current_piece;
-    int num_rows_cleared = detect_clear_rows(game);
-    if (num_rows_cleared == 0) return ATK_NONE;
-
-    switch (current_piece->type) {
-        case T_PIECE: return get_t_attack_type(game, num_rows_cleared);
-        case I_PIECE: return get_i_attack_type(game, num_rows_cleared);
-        case O_PIECE: return get_o_attack_type(game, num_rows_cleared);
-        case S_PIECE: return get_s_attack_type(game, num_rows_cleared);
-        case Z_PIECE: return get_z_attack_type(game, num_rows_cleared);
-        case J_PIECE: return get_j_attack_type(game, num_rows_cleared);
-        case L_PIECE: return get_l_attack_type(game, num_rows_cleared);
-        default: return ATK_ERROR;
-    }
-}
-
 AttackType get_t_attack_type(Game* game, int num_rows_cleared) {
-    Piece* current_piece = game->current_piece;
     if (
-        game->state->is_last_rotate == 0
-        || !is_t_triple_corner(game)
+        (
+            game->state->is_last_rotate == 0
+            || !is_t_triple_corner(game)
+        )
+        // mini+
+        && !is_current_piece_movable(game)
     ) return get_none_spin_attack_type(num_rows_cleared);
     if (is_t_rect_has_hole(game) && game->state->is_last_rotate != 5) {
         // mini
@@ -602,7 +549,6 @@ AttackType get_t_attack_type(Game* game, int num_rows_cleared) {
 }
 
 AttackType get_i_attack_type(Game* game, int num_rows_cleared) {
-    Piece* current_piece = game->current_piece;
     if (
         game->state->is_last_rotate == 0
         || is_current_piece_movable(game)
@@ -617,7 +563,6 @@ AttackType get_i_attack_type(Game* game, int num_rows_cleared) {
 }
 
 AttackType get_o_attack_type(Game* game, int num_rows_cleared) {
-    Piece* current_piece = game->current_piece;
     if (
         game->state->is_last_rotate == 0
         || is_current_piece_movable(game)
@@ -631,7 +576,6 @@ AttackType get_o_attack_type(Game* game, int num_rows_cleared) {
 }
 
 AttackType get_s_attack_type(Game* game, int num_rows_cleared) {
-    Piece* current_piece = game->current_piece;
     if (
         game->state->is_last_rotate == 0
         || is_current_piece_movable(game)
@@ -646,7 +590,6 @@ AttackType get_s_attack_type(Game* game, int num_rows_cleared) {
 }
 
 AttackType get_z_attack_type(Game* game, int num_rows_cleared) {
-    Piece* current_piece = game->current_piece;
     if (
         game->state->is_last_rotate == 0
         || is_current_piece_movable(game)
@@ -661,7 +604,6 @@ AttackType get_z_attack_type(Game* game, int num_rows_cleared) {
 }
 
 AttackType get_j_attack_type(Game* game, int num_rows_cleared) {
-    Piece* current_piece = game->current_piece;
     if (
         game->state->is_last_rotate == 0
         || is_current_piece_movable(game)
@@ -676,7 +618,6 @@ AttackType get_j_attack_type(Game* game, int num_rows_cleared) {
 }
 
 AttackType get_l_attack_type(Game* game, int num_rows_cleared) {
-    Piece* current_piece = game->current_piece;
     if (
         game->state->is_last_rotate == 0
         || is_current_piece_movable(game)
@@ -690,11 +631,65 @@ AttackType get_l_attack_type(Game* game, int num_rows_cleared) {
     }
 }
 
+
+AttackType get_attack_type(Game* game) {
+    // before lock_piece
+    int num_rows_cleared = detect_clear_rows(game);
+    if (num_rows_cleared == 0) return ATK_NONE;
+
+    switch (game->current_piece->type) {
+        case T_PIECE: return get_t_attack_type(game, num_rows_cleared);
+        case I_PIECE: return get_i_attack_type(game, num_rows_cleared);
+        case O_PIECE: return get_o_attack_type(game, num_rows_cleared);
+        case S_PIECE: return get_s_attack_type(game, num_rows_cleared);
+        case Z_PIECE: return get_z_attack_type(game, num_rows_cleared);
+        case J_PIECE: return get_j_attack_type(game, num_rows_cleared);
+        case L_PIECE: return get_l_attack_type(game, num_rows_cleared);
+        default: return ATK_ERROR;
+    }
+}
+
 Bool is_perfect_clear(Game* game) {
-    int simulation_board[10][23] = simulation_clear_rows(game);
+    Board* board = game->board;
+    Piece* current_piece = game->current_piece;
+
+    int temp_board[10][23];
+    memcpy(temp_board, board->state, sizeof(board->state));
+
+    for (int i = 0; i < 4; i++) {
+        for (int j = 0; j < 4; j++) {
+            if (current_piece->shape[i][j] == 0) continue;
+
+            int x = current_piece->x + j;
+            int y = current_piece->y - i;
+            
+            temp_board[x][y] = (int)current_piece->type + 1;
+        }
+    }    
+
+    for (int y = board->height - 1; y >= 0; y--) {
+        Bool is_row_full = TRUE;
+        for (int x = 0; x < board->width; x++) {
+            if (temp_board[x][y] == 0) {
+                is_row_full = FALSE;
+                break;
+            }
+        }
+        if (!is_row_full) continue;
+
+        for (int yy = y; yy <= board->height - 1; yy++) {
+            for (int x = 0; x < board->width; x++) {
+                temp_board[x][yy] = temp_board[x][yy + 1];
+            }
+        }
+        for (int x = 0; x < board->width; x++) {
+            temp_board[x][board->height - 1] = 0;
+        }
+    }
+
     for (int y = 0; y < 23; y++) {
         for (int x = 0; x < 10; x++) {
-            if (simulation_board[x][y] != 0) return FALSE;
+            if (temp_board[x][y] != 0) return FALSE;
         }
     }
     return TRUE;

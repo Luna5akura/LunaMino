@@ -36,6 +36,8 @@ typedef struct {
     Bool is_update_clear_rows_needed;
     AttackType attack_type;
     Bool is_pc;
+    int b2b_count;
+    int atk_count;
     Bool is_game_over;
 } TetrisState;
 
