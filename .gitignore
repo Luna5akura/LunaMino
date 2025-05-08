@@ -1,0 +1,4 @@
+*.o
+*.exe
+tetris-console
+tetris-raylib
