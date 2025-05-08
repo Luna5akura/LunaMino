@@ -18,6 +18,36 @@
 #define TETRIS_LOCK_DELAY 500.0f
 #define TETRIS_RESET_LOCK_TIMES_LIMIT 15
 
+const char TETRIS_ATK_STR[28][20] = {
+    "",
+    "Single",
+    "Double",
+    "Triple",
+    "Quad",
+    "T-Spin Single Mini",
+    "T-Spin Single",
+    "T-Spin Double Mini",
+    "T-Spin Double",
+    "T-Spin Triple",
+    "I-Spin Single",
+    "I-Spin Double",
+    "I-Spin Triple",
+    "O-Spin Single",
+    "O-Spin Double",
+    "S-Spin Single",
+    "S-Spin Double",
+    "S-Spin Triple",
+    "Z-Spin Single",
+    "Z-Spin Double",
+    "Z-Spin Triple",
+    "L-Spin Single",
+    "L-Spin Double",
+    "L-Spin Triple",
+    "J-Spin Single",
+    "J-Spin Double",
+    "J-Spin Triple",
+    "ERROR",
+};
 
 Color GetColorForPieceType(int type) {
     switch (type) {
@@ -75,6 +105,9 @@ TetrisState* init_tetris_state(Game* game, TetrisConfig* config) {
     state->is_right_pressed = FALSE;
     state->is_soft_drop_pressed = FALSE;
     state->is_grounded = FALSE;
+    state->is_update_clear_rows_needed = FALSE;
+    state->attack_type = ATK_NONE;
+    state->is_pc = FALSE;
     state->is_game_over = FALSE;
 
     return state;
@@ -101,6 +134,7 @@ void flush_lock_timer(Tetris* tetris) {
     if (tetris->state->lock_times_left == -1) {
         next_piece(tetris->game);
         reset_lock_times_left(tetris);
+        tetris->state->is_update_clear_rows_needed = TRUE;
         tetris->state->is_grounded = FALSE;
     }
 }
@@ -113,6 +147,7 @@ void update_drop_timer(Tetris* tetris) {
         if (tetris->state->lock_timer * 1000 >= tetris->config->lock_delay) {
             next_piece(game);
             reset_lock_times_left(tetris);
+            tetris->state->is_update_clear_rows_needed = TRUE;
             tetris->state->is_grounded = FALSE;
         }
     }
@@ -223,6 +258,7 @@ void detect_input(Tetris* tetris) {
     if (IsKeyPressed(KEY_SPACE)) {
         try_move_piece(game, MOVE_HARD_DROP);
         tetris->state->is_game_over = next_piece(game);
+        tetris->state->is_update_clear_rows_needed = TRUE;
         tetris->state->is_grounded = FALSE;
         reset_lock_times_left(tetris);
     }
@@ -399,6 +435,16 @@ void draw_shadow(Tetris* tetris) {
     }
 }
 
+void draw_game_over(Tetris* tetris) {
+    DrawText(
+        "Game Over", 
+        tetris->config->width / 2 - MeasureText("Game Over", 40) / 2, 
+        tetris->config->height / 2 - 20, 
+        40, 
+        RED
+    );
+}
+
 void draw_debug_info(Tetris* tetris) {
     char buffer[256];
 
@@ -419,24 +465,65 @@ void draw_debug_info(Tetris* tetris) {
     );
 }
 
+void draw_attack(Tetris* tetris) {
+    Game* game = tetris->game;
+
+    if (game->state->hold_piece == NULL) return;
+    
+    int blockSize = tetris->config->block_size;
+
+    int boardOffsetX = (tetris->config->width - game->board->width * blockSize) / 2;
+    int boardOffsetY = (tetris->config->height - game->board->height * blockSize) / 2;    
+
+    int atkOffsetX = boardOffsetX - (game->board->width + 2) * blockSize / 2;
+    int atkOffsetY = boardOffsetY + 7 * blockSize;
+
+    char buffer[64];
+
+    snprintf(buffer, 64,
+        "%s\n%s\n%s%i",
+        TETRIS_ATK_STR[tetris->state->attack_type],
+        tetris->state->is_pc ? "Perfect Clear" : "",
+        tetris->game->state->ren > 0 ? "REN: " : "",
+        tetris->game->state->ren
+    );
+
+    DrawText(
+        buffer, 
+        atkOffsetX, 
+        atkOffsetY,
+        15,     
+        DARKGRAY
+    );
+}
+
 void run_game(Game* game) {
     Tetris* tetris = init_tetris(game);
 
     init_window(tetris);
     SetTargetFPS(tetris->config->fps);
-
     while (!WindowShouldClose()) {
-        
         detect_input(tetris);
-
-        if (tetris->state->is_game_over == TRUE) exit_window();
-
+        if (tetris->state->is_game_over) exit_window();
         update_drop_timer(tetris);
-        clear_rows(game->board);
-
+        
+        
         BeginDrawing();
-        ClearBackground(RAYWHITE);
+        if (tetris->state->is_update_clear_rows_needed) {
+            printf("update clear rows\n");
+            tetris->state->attack_type = get_attack_type(game);
+            tetris->state->is_pc = is_perfect_clear(game);
+            update_ren(game);
+            draw_attack(tetris);
+            tetris->state->is_update_clear_rows_needed = FALSE;
+            tetris->state->attack_type = ATK_NONE;
+            tetris->state->is_pc = FALSE;
 
+            clear_rows(game->board);
+        }
+
+
+        ClearBackground(RAYWHITE);
         draw_board(tetris);
         if (tetris->config->is_shadow_enabled) draw_shadow(tetris);
         draw_piece(tetris);
@@ -444,16 +531,7 @@ void run_game(Game* game) {
         draw_hold_piece(tetris);
         draw_debug_info(tetris);
 
-        if (tetris->state->is_game_over == TRUE) {
-            DrawText(
-                "Game Over", 
-                tetris->config->width / 2 - MeasureText("Game Over", 40) / 2, 
-                tetris->config->height / 2 - 20, 
-                40, 
-                RED
-            );
-        }
-
+        if (tetris->state->is_game_over) draw_game_over(tetris);
         EndDrawing();
     }
 }

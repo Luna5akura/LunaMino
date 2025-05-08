@@ -33,6 +33,9 @@ typedef struct {
     Bool is_right_pressed;
     Bool is_soft_drop_pressed;
     Bool is_grounded;
+    Bool is_update_clear_rows_needed;
+    AttackType attack_type;
+    Bool is_pc;
     Bool is_game_over;
 } TetrisState;
 
