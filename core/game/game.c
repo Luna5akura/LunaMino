@@ -114,6 +114,17 @@ Game* init_game() {
     return game;
 }
 
+void free_game(Game* game) {
+    
+    free(game->current_piece);
+    free(game->state->previews);
+    free(game->state->bag);
+    free(game->state);
+    free(game->config);
+    free(game->board);
+    free(game);
+}
+
 Bool is_overlapping(Board* board, Piece* piece) {
     for (int i = 0; i < 4; i++) {
         for (int j = 0; j < 4; j++) {

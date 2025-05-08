@@ -209,6 +209,7 @@ void update_drop_timer(Tetris* tetris) {
 }
 
 void restart_game(Tetris* tetris) {
+    free_game(tetris->game);
     Game *game = init_game(TRUE);
     tetris = init_tetris(game);
 }
@@ -318,7 +319,8 @@ void detect_input(Tetris* tetris) {
         tetris->state->drop_timer = 0.0f;
         reset_lock_times_left(tetris);
     }
-    if (IsKeyPressed(KEY_R)) {
+    if (IsKeyDown(KEY_R)) {
+        printf("restart");
         restart_game(tetris);
     }
 }
@@ -714,23 +716,10 @@ void run_game(Game* game) {
     }
 }
 
-void free_game(Game* game) {
-    
-    free(game->current_piece);
-    free(game->state->previews);
-    free(game->state->bag);
-    free(game->state);
-    free(game->config);
-    free(game->board);
-    free(game);
-    CloseWindow();
-
-}
-
 int main() {
     Game* game = init_game(TRUE);
     run_game(game);
     free_game(game);
-
+    CloseWindow();
     return 0;
 }

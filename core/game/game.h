@@ -65,6 +65,7 @@ typedef struct {
 } Game;
 
 Game* init_game();
+void free_game(Game* game);
 Bool try_move_piece(Game* game, MoveAction action);
 Bool try_rotate_piece(Game* game, RotationAction action);
 int clear_rows(Board* board);
