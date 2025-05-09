@@ -5,6 +5,8 @@
 #include <stdio.h>
 #include "interact.h"
 
+#define TETRIS_GAME_HEIGHT 20
+
 #define TETRIS_WIDTH 800
 #define TETRIS_HEIGHT 600
 #define TETRIS_BLOCK_SIZE 20
@@ -115,6 +117,16 @@ void init_window(Tetris* tetris) {
     int screenWidth = tetris->config->width;
     int screenHeight = tetris->config->height;
     InitWindow(screenWidth, screenHeight, "Tetris Game");
+}
+
+void draw_game_over(Tetris* tetris) {
+    DrawText(
+        "Game Over", 
+        tetris->config->width / 2 - MeasureText("Game Over", 40) / 2, 
+        tetris->config->height / 2 - 20, 
+        40, 
+        RED
+    );
 }
 
 void exit_window() {}
@@ -305,7 +317,18 @@ void detect_input(Tetris* tetris) {
             tetris->state->is_grounded = is_grounded(game);
         }
     }
-    if (IsKeyPressed(KEY_A)) try_rotate_piece(game, ROTATE_180);
+    if (IsKeyPressed(KEY_A)) {
+        Bool is_successful = try_rotate_piece(game, ROTATE_180);
+        if (is_successful) {
+            if (tetris->state->is_grounded) {
+                flush_lock_timer(tetris);
+            }
+            else {
+                tetris->state->lock_timer = 0.0f;
+            }
+            tetris->state->is_grounded = is_grounded(game);
+        }
+    }
     if (IsKeyPressed(KEY_C)) {
         tetris->state->is_game_over = try_hold_piece(game);
         tetris->state->drop_timer = 0.0f;
@@ -390,7 +413,10 @@ void draw_board(Tetris* tetris) {
     
     for (int y = 0; y < game->board->height; y++) {
         for (int x = 0; x < game->board->width; x++) {
+            if (y >= TETRIS_GAME_HEIGHT && game->board->state[x][y] == 0) continue;
+
             Color color = GetColorForPieceType(game->board->state[x][y]);
+            
             DrawRectangle(
                 boardOffsetX + x * blockSize, 
                 boardOffsetY + (game->board->height - y - 1) * blockSize, 
@@ -398,6 +424,7 @@ void draw_board(Tetris* tetris) {
                 blockSize, 
                 color
             );
+
             DrawRectangleLines(
                 boardOffsetX + x * blockSize, 
                 boardOffsetY + (game->board->height - y - 1) * blockSize, 
@@ -552,16 +579,6 @@ void draw_shadow(Tetris* tetris) {
     }
 }
 
-void draw_game_over(Tetris* tetris) {
-    DrawText(
-        "Game Over", 
-        tetris->config->width / 2 - MeasureText("Game Over", 40) / 2, 
-        tetris->config->height / 2 - 20, 
-        40, 
-        RED
-    );
-}
-
 void draw_debug_info(Tetris* tetris) {
     char buffer[2048];
 
@@ -671,15 +688,17 @@ void run_game(Game* game) {
     SetTargetFPS(tetris->config->fps);
     while (!WindowShouldClose()) {
         detect_input(tetris);
+        if (tetris->state->is_game_over) draw_game_over(tetris);
         update_drop_timer(tetris);
         
         if (tetris->state->is_update_clear_rows_needed) {
+            printf("update_clear_rows_needed\n");
             tetris->state->attack_type = get_attack_type(game);
             tetris->state->is_pc = is_perfect_clear(game);
             update_ren(game);
             update_atk(tetris);
-            next_piece(game);
-            if (tetris->state->is_game_over) exit_window();
+            tetris->state->is_game_over = next_piece(game);
+            if (tetris->state->is_game_over) draw_game_over(tetris);
             int clear_count = clear_rows(game->board);
             if (clear_count > 0) {
                 if (

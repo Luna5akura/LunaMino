@@ -5,6 +5,10 @@
 #include <string.h>
 #include <stdio.h>
 
+#define GAME_SPAWN_X 3
+#define GAME_SPAWN_Y 21
+#define GAME_VISIBLE_HEIGHT 20
+
 #define GAME_PREVIEW_COUNT 5
 #define GAME_IS_HOLD_ENABLED TRUE
 #define GAME_SEED 0
@@ -133,12 +137,25 @@ Bool is_overlapping(Board* board, Piece* piece) {
             int x = piece->x + j;
             int y = piece->y - i;
 
-            if (x < 0 || x >= board->width || y < 0 || y >= board->height + 3) return TRUE; 
+            if (x < 0 || x >= board->width || y < 0) return TRUE; 
             if (board->state[x][y] != 0) return TRUE;
         }
     }
     return FALSE;
 }
+
+Bool is_top_out(Board* board, Piece* piece) {
+    for (int i = 0; i < 4; i++) {
+        for (int j = 0; j < 4; j++) {
+            if (piece->shape[i][j] == 0) continue;
+            int x = piece->x + j;
+            int y = piece->y - i;
+
+            if (y < GAME_VISIBLE_HEIGHT) return FALSE;
+        }
+    }
+    return TRUE;
+} 
 
 Bool hard_drop(Piece* piece, Board* board) {
     // return: is_successful
@@ -322,7 +339,7 @@ int detect_clear_rows(Game* game) {
     Piece* current_piece = game->current_piece;
 
     int num_rows_cleared = 0;
-    int temp_board[10][23];
+    int temp_board[board->width][board->height];
     memcpy(temp_board, board->state, sizeof(board->state));
 
     for (int i = 0; i < 4; i++) {
@@ -403,8 +420,8 @@ Bool spawn_piece(Game* game) {
     
 
     Piece* new_piece = init_piece(type);
-    new_piece->x = 3;
-    new_piece->y = 21;
+    new_piece->x = GAME_SPAWN_X;
+    new_piece->y = GAME_SPAWN_Y;
     game->current_piece = new_piece;
     
     free(current_piece);
@@ -667,7 +684,7 @@ Bool is_perfect_clear(Game* game) {
     Board* board = game->board;
     Piece* current_piece = game->current_piece;
 
-    int temp_board[10][23];
+    int temp_board[board->width][board->height];
     memcpy(temp_board, board->state, sizeof(board->state));
 
     for (int i = 0; i < 4; i++) {
@@ -724,6 +741,8 @@ Bool is_grounded(Game* game) {
 
 int get_shadow_height(Game* game) {
     Piece* current_piece = game->current_piece;
+
+    if (is_overlapping(game->board, current_piece)) return 0;
 
     int shadow_height = -1;
     int original_y = current_piece->y;
