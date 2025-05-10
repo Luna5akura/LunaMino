@@ -152,6 +152,10 @@ TetrisConfig* init_tetris_config(Game* game) {
     return config;
 }
 
+void free_tetris_config(TetrisConfig* config) {
+    free(config);
+}
+
 TetrisState* init_tetris_state(Game* game, TetrisConfig* config) {
     TetrisState* state = (TetrisState*)malloc(sizeof(TetrisState));
 
@@ -175,6 +179,10 @@ TetrisState* init_tetris_state(Game* game, TetrisConfig* config) {
     return state;
 }
 
+void free_tetris_state(TetrisState* state) {
+    free(state);
+}
+
 Tetris* init_tetris(Game* game) {
     Tetris* tetris = (Tetris*)malloc(sizeof(Tetris));
 
@@ -183,6 +191,13 @@ Tetris* init_tetris(Game* game) {
     tetris->game = game;
 
     return tetris;
+}
+
+void free_tetris(Tetris* tetris) {
+    free_tetris_config(tetris->config);
+    free_tetris_state(tetris->state);
+    free_game(tetris->game);
+    free(tetris);
 }
 
 void reset_lock_times_left(Tetris* tetris) {
@@ -221,7 +236,7 @@ void update_drop_timer(Tetris* tetris) {
 }
 
 void restart_game(Tetris* tetris) {
-    free_game(tetris->game);
+    free_tetris(tetris);
     Game *game = init_game(TRUE);
     tetris = init_tetris(game);
 }
@@ -500,7 +515,7 @@ void draw_previews(Tetris* tetris) {
                 }
             }
         }
-        free(preview_piece);
+        free_piece(preview_piece);
     }
 }
 

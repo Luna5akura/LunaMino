@@ -12,6 +12,10 @@ Previews*  init_previews(int length) {
     return previews;
 }
 
+void free_previews(Previews* previews) {
+    free(previews);
+}
+
 PieceType next_preview(Previews* previews, PieceType input) {
     PieceType rtn = previews->previews[previews->current];
     previews->previews[previews->current] = input;

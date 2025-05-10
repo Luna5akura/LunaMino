@@ -77,6 +77,10 @@ GameConfig* init_game_config() {
     return config;
 }
 
+void free_game_config(GameConfig* config) {
+    free(config);
+}
+
 GameState* init_game_state(GameConfig* config) {
     GameState* state = malloc(sizeof(GameState));
     
@@ -95,6 +99,13 @@ GameState* init_game_state(GameConfig* config) {
     state->ren = -1;
 
     return state;
+}
+
+void free_game_state(GameState* state) {
+    free_bag(state->bag);
+    free_previews(state->previews);
+    if (state->hold_piece) free_piece(state->hold_piece);
+    free(state);
 }
 
 Game* init_game() {
@@ -119,13 +130,10 @@ Game* init_game() {
 }
 
 void free_game(Game* game) {
-    
-    free(game->current_piece);
-    free(game->state->previews);
-    free(game->state->bag);
-    free(game->state);
-    free(game->config);
-    free(game->board);
+    free_game_config(game->config);
+    free_game_state(game->state);
+    free_board(game->board);
+    if (game->current_piece) free_piece(game->current_piece);
     free(game);
 }
 
@@ -453,7 +461,7 @@ Bool hold_piece(Game* game) {
     }
     else {
         Piece* hold_piece = game->state->hold_piece;
-        free(game->current_piece);
+        free_piece(game->current_piece);
         game->state->hold_piece = init_piece(current_piece_type);
 
         Piece* new_piece = init_piece(hold_piece->type);
@@ -462,7 +470,7 @@ Bool hold_piece(Game* game) {
         new_piece->rotation = (Rotation)0;
         memcpy(new_piece->shape, hold_piece->shape, sizeof(hold_piece->shape));
 
-        free(hold_piece);
+        free_piece(hold_piece);
         game->current_piece = new_piece;
 
         if (is_overlapping(game->board, new_piece)) return TRUE;

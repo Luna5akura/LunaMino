@@ -21,3 +21,7 @@ Board* init_board() {
     return board;
 }
 
+void free_board(Board* board) {
+    free(board);
+}
+

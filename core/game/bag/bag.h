@@ -11,6 +11,7 @@ typedef struct {
 } Bag;
 
 Bag* init_bag();
+void free_bag(Bag* bag);
 PieceType bag_next_piece(Bag* bag);
 
 #endif

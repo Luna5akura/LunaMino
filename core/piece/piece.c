@@ -239,6 +239,10 @@ Piece* init_piece(PieceType type) {
     return piece;
 }
 
+void free_piece(Piece* piece) {
+    free(piece);
+}
+
 void move_piece(Piece* piece, MoveAction action) {
     // no hard drop, hard drop is handledd by function hard_drop
     switch (action) {

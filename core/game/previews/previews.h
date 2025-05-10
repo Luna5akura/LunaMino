@@ -11,7 +11,8 @@ typedef struct {
     PieceType previews[];
 } Previews;
 
-Previews*  init_previews(int length);
+Previews* init_previews(int length);
+void free_previews(Previews* previews);
 PieceType next_preview(Previews* previews, PieceType input);
 
 #endif

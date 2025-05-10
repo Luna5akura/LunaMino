@@ -12,5 +12,6 @@ typedef struct {
 } Board;
 
 Board* init_board();
+void free_board(Board* board);
 
 #endif

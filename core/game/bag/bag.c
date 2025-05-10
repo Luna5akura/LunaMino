@@ -23,6 +23,10 @@ Bag* init_bag() {
     return bag;
 }
 
+void free_bag(Bag* bag) {
+    free(bag);
+}
+
 PieceType bag_next_piece(Bag* bag) {
     bag->current = bag->current + 1;
     if (bag->current >= 7) {
@@ -31,3 +35,4 @@ PieceType bag_next_piece(Bag* bag) {
     }
     return bag->sequence[bag->current];
 }
+
