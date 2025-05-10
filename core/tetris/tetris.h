@@ -1,7 +1,7 @@
-// core/interact/interact.h
+// core/tetris/tetris.h
 
-#ifndef INTERACT_H
-#define INTERACT_H
+#ifndef TETRIS_H
+#define TETRIS_H
 
 #include "../core/game/game.h"
 

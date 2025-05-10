@@ -16,6 +16,14 @@ void free_previews(Previews* previews) {
     free(previews);
 }
 
+Previews* copy_previews(Previews* previews) {
+    size_t total_size = sizeof(Previews) + previews->length * sizeof(PieceType);
+    Previews* new_previews = malloc(total_size);
+
+    memcpy(new_previews, previews, total_size);
+    return new_previews;
+}
+
 PieceType next_preview(Previews* previews, PieceType input) {
     PieceType rtn = previews->previews[previews->current];
     previews->previews[previews->current] = input;

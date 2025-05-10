@@ -25,3 +25,11 @@ void free_board(Board* board) {
     free(board);
 }
 
+Board* copy_board(Board* board) {
+    Board* new_board = (Board*) malloc(sizeof(Board));
+    if (new_board == NULL) {
+        exit(1);
+    }
+    memcpy(new_board, board, sizeof(Board));
+    return new_board;
+}

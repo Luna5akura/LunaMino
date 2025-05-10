@@ -13,6 +13,7 @@ typedef struct {
 
 Previews* init_previews(int length);
 void free_previews(Previews* previews);
+Previews* copy_previews(Previews* previews);
 PieceType next_preview(Previews* previews, PieceType input);
 
 #endif

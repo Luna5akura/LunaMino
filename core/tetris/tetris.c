@@ -1,9 +1,9 @@
-// core/interact/interact.c
+// core/tetris/tetris.c
 
 #include <raylib.h>
 #include <stdlib.h>
 #include <stdio.h>
-#include "interact.h"
+#include "tetris.h"
 
 #define INPUT_LEFT KEY_LEFT
 #define INPUT_RIGHT KEY_RIGHT
@@ -166,6 +166,14 @@ void free_tetris_config(TetrisConfig* config) {
     free(config);
 }
 
+TetrisConfig* copy_tetris_config(TetrisConfig* config) {
+    TetrisConfig* new_config = (TetrisConfig*)malloc(sizeof(TetrisConfig));
+
+    memcpy(new_config, config, sizeof(TetrisConfig));
+
+    return new_config;
+}
+
 TetrisState* init_tetris_state(Game* game, TetrisConfig* config) {
     TetrisState* state = (TetrisState*)malloc(sizeof(TetrisState));
 
@@ -193,6 +201,14 @@ void free_tetris_state(TetrisState* state) {
     free(state);
 }
 
+TetrisState* copy_tetris_state(TetrisState* state) {
+    TetrisState* new_state = (TetrisState*)malloc(sizeof(TetrisState));
+
+    memcpy(new_state, state, sizeof(TetrisState));
+
+    return new_state;
+}
+
 Tetris* init_tetris(Game* game) {
     Tetris* tetris = (Tetris*)malloc(sizeof(Tetris));
 
@@ -208,6 +224,16 @@ void free_tetris(Tetris* tetris) {
     free_tetris_state(tetris->state);
     free_game(tetris->game);
     free(tetris);
+}
+
+Tetris* copy_tetris(Tetris* tetris) {    
+    Tetris* new_tetris = (Tetris*)malloc(sizeof(Tetris));
+
+    new_tetris->config = copy_tetris_config(tetris->config);
+    new_tetris->state = copy_tetris_state(tetris->state);
+    new_tetris->game = copy_game(tetris->game);
+
+    return new_tetris;
 }
 
 void check_integrity(Tetris* tetris) {

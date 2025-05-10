@@ -243,6 +243,15 @@ void free_piece(Piece* piece) {
     free(piece);
 }
 
+Piece* copy_piece(Piece* piece) {
+    Piece* new_piece = (Piece*)malloc(sizeof(Piece));
+    if (new_piece == NULL) {
+        exit(1);
+    }
+    memcpy(new_piece, piece, sizeof(Piece));
+    return new_piece;
+}
+
 void move_piece(Piece* piece, MoveAction action) {
     // no hard drop, hard drop is handledd by function hard_drop
     switch (action) {

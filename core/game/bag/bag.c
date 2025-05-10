@@ -27,6 +27,12 @@ void free_bag(Bag* bag) {
     free(bag);
 }
 
+Bag* copy_bag(Bag* bag) {
+    Bag* new_bag = (Bag*)malloc(sizeof(Bag));
+    memcpy(new_bag, bag, sizeof(Bag));
+    return new_bag;
+}
+
 PieceType bag_next_piece(Bag* bag) {
     bag->current = bag->current + 1;
     if (bag->current >= 7) {

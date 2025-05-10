@@ -13,5 +13,6 @@ typedef struct {
 
 Board* init_board();
 void free_board(Board* board);
+Board* copy_board(Board* board);
 
 #endif

@@ -28,6 +28,7 @@ typedef struct {
 
 Piece* init_piece(PieceType type);
 void free_piece(Piece* piece);
+Piece* copy_piece(Piece* piece);
 void move_piece(Piece* piece, MoveAction action);
 void displace_piece(Piece* piece, const int direction[2]);
 void rotate_piece(Piece* piece, RotationAction action);
