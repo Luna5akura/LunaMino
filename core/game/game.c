@@ -167,9 +167,8 @@ Bool is_top_out(Board* board, Piece* piece) {
     for (int i = 0; i < 4; i++) {
         for (int j = 0; j < 4; j++) {
             if (piece->shape[i][j] == 0) continue;
-            int x = piece->x + j;
+            
             int y = piece->y - i;
-
             if (y < GAME_VISIBLE_HEIGHT) return FALSE;
         }
     }
@@ -243,13 +242,11 @@ Bool try_rotate_piece_normal(Game* game, RotationAction action) {
     memcpy(original_shape, current_piece->shape, sizeof(current_piece->shape));
     rotate_piece(current_piece, action);
 
-    int table[4][2][5][2] = current_piece->type == I_PIECE ? I_PIECE_NORMAL_SRS : NORMAL_PIECE_NORMAL_SRS;
-
     for (int i = 0; i < 5; i++) {
-        Bool is_successful = try_displace_piece(
-            game,
-            table[(int)original_rotation][(int)action][i]
-        );
+        Bool is_successful = current_piece->type == I_PIECE
+            ? try_displace_piece(game, I_PIECE_NORMAL_SRS[(int)original_rotation][(int)action][i])
+            : try_displace_piece(game, NORMAL_PIECE_NORMAL_SRS[(int)original_rotation][(int)action][i]);
+
         if (is_successful) {
             game->state->is_last_rotate = i + 1;
             return TRUE;
@@ -269,13 +266,12 @@ Bool try_rotate_piece_180(Game* game, RotationAction action) {
     rotate_piece(current_piece, action);
 
     int kick_cnt = current_piece->type == I_PIECE ? 2 : 6;
-    int table[4][6][2] = current_piece->type == I_PIECE ? I_PIECE_180_SRS : NORMAL_PIECE_180_SRS;
 
     for (int i = 0; i < kick_cnt; i++) {
-        Bool is_successful = try_displace_piece(
-            game, 
-            table[(int)original_rotation][i]
-        );
+        Bool is_successful = current_piece->type == I_PIECE
+            ? try_displace_piece(game, I_PIECE_180_SRS[(int)original_rotation][i])
+            : try_displace_piece(game, NORMAL_PIECE_180_SRS[(int)original_rotation][i]);
+
         if (is_successful) {
             game->state->is_last_rotate = i + 1;
             return TRUE;

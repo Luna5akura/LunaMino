@@ -210,6 +210,20 @@ void free_tetris(Tetris* tetris) {
     free(tetris);
 }
 
+void check_integrity(Tetris* tetris) {
+    TetrisConfig* config = tetris->config;
+    TetrisState* state = tetris->state;
+    Game* game = tetris->game;
+    GameConfig* game_config = game->config;
+    GameState* game_state = game->state;
+    Piece* game_piece = game->current_piece;
+    Board* game_board = game->board;
+    Bag* game_bag = game->state->bag;
+    Previews* game_previews = game->state->previews;
+    return;
+}
+
+
 void reset_lock_times_left(Tetris* tetris) {
     tetris->state->lock_times_left = tetris->config->reset_lock_times_limit;
     tetris->state->lock_timer = 0.0f;
@@ -245,10 +259,11 @@ void update_drop_timer(Tetris* tetris) {
     }
 }
 
-void restart_game(Tetris* tetris) {
+Tetris* restart_game(Tetris* tetris) {
     free_tetris(tetris);
     Game *game = init_game(TRUE);
     tetris = init_tetris(game);
+    return tetris;
 }
 
 void detect_left_or_right(Tetris* tetris) {
@@ -262,14 +277,12 @@ void detect_left_or_right(Tetris* tetris) {
         if (IsKeyPressed(INPUT_RIGHT)) is_successful = try_move_piece(game, MOVE_RIGHT);
         if (!is_successful) return;
 
-        if (tetris->state->is_grounded) flush_lock_timer(tetris);
-        else tetris->state->lock_timer = 0.0f;
-
         tetris->state->is_grounded = is_grounded(game);
+        if (tetris->state->is_grounded) flush_lock_timer(tetris);
     }
     else {
         tetris->state->das_timer += GetFrameTime() * 1000;
-        if (!tetris->state->das_timer >= tetris->config->das) return;
+        if (tetris->state->das_timer < tetris->config->das) return;
         // begin arr
         tetris->state->arr_timer += GetFrameTime() * 1000;
 
@@ -282,8 +295,8 @@ void detect_left_or_right(Tetris* tetris) {
             move_count++;
             tetris->state->arr_timer -= tetris->config->arr;
         }
-        if (tetris->state->is_grounded && move_count > 0) flush_lock_timer(tetris);
         tetris->state->is_grounded = is_grounded(game);
+        if (tetris->state->is_grounded && move_count > 0) flush_lock_timer(tetris);
     }
 }
 
@@ -311,10 +324,8 @@ void detect_rotate(Tetris* tetris, RotationAction action) {
     Bool is_successful = try_rotate_piece(game, action);
     if (!is_successful) return;
     
-    if (tetris->state->is_grounded) flush_lock_timer(tetris);
-    else tetris->state->lock_timer = 0.0f;
-
     tetris->state->is_grounded = is_grounded(game);
+    if (tetris->state->is_grounded) flush_lock_timer(tetris);
 }
 
 void detect_hold(Tetris* tetris) {
@@ -329,7 +340,7 @@ void detect_hold(Tetris* tetris) {
 void detect_hard_drop(Tetris* tetris) {
     Game* game = tetris->game;
 
-    tetris->state->is_game_over = try_move_piece(game, MOVE_HARD_DROP);
+    try_move_piece(game, MOVE_HARD_DROP);
     tetris->state->drop_timer = 0.0f;
     tetris->state->is_grounded = FALSE;
     reset_lock_times_left(tetris);
@@ -338,9 +349,7 @@ void detect_hard_drop(Tetris* tetris) {
 }
 
 
-void detect_input(Tetris* tetris) {
-    Game* game = tetris->game;
-
+Tetris* detect_input(Tetris* tetris) {
     if (IsKeyDown(INPUT_LEFT) || IsKeyDown(INPUT_RIGHT)) detect_left_or_right(tetris);
     else tetris->state->das_timer = 0.0f;
     if (IsKeyDown(INPUT_SOFT_DROP)) detect_soft_drop(tetris);
@@ -349,10 +358,13 @@ void detect_input(Tetris* tetris) {
     if (IsKeyPressed(INPUT_ROTATE_180)) detect_rotate(tetris, ROTATE_180);
     if (IsKeyPressed(INPUT_HOLD)) detect_hold(tetris);
     if (IsKeyPressed(INPUT_HARD_DROP)) detect_hard_drop(tetris);
-    if (IsKeyDown(INPUT_RESTART)) restart_game(tetris);
+    if (IsKeyDown(INPUT_RESTART)) tetris = restart_game(tetris);
+    return tetris;
 }
 
-int get_s2_atk(Tetris* tetris) {\
+int get_s2_atk(Tetris* tetris) {
+    printf("attack type: %d\n", tetris->state->attack_type);
+
     int total_atk = 0;
     int b2b_charging = 0;
     if (
@@ -718,7 +730,7 @@ void update_clear_rows(Tetris* tetris) {
     tetris->state->is_game_over = next_piece(game);
     if (tetris->state->is_game_over) draw_game_over(tetris); // ??
     int clear_count = clear_rows(game->board);
-    if (!clear_count > 0) return;
+    if (clear_count == 0) return;
     if (
         tetris->state->attack_type == ATK_SINGLE 
         || tetris->state->attack_type == ATK_DOUBLE
@@ -733,7 +745,7 @@ void run_game(Game* game) {
     init_window(tetris);
     SetTargetFPS(tetris->config->fps);
     while (!WindowShouldClose()) {
-        detect_input(tetris);
+        tetris = detect_input(tetris);
         if (tetris->state->is_game_over) draw_game_over(tetris); // ??
         
         update_drop_timer(tetris);
