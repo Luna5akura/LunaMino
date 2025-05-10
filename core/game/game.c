@@ -65,6 +65,17 @@ const int I_PIECE_180_SRS[4][2][2] = {
     { {0, 0}, {-1, 0} }, // LEFT
 };
 
+const int T_CORNERS[4][2] = {
+    {0, 0}, {0, 2}, {2, 0}, {2, 2}
+};
+
+
+const int T_RECTS[4][2][2] = {
+    { {0, 0}, {0, 2} },
+    { {0, 2}, {2, 2} },
+    { {2, 0}, {2, 2} },
+    { {0, 0}, {2, 0} }
+};
 
 GameConfig* init_game_config() {
     GameConfig* config = malloc(sizeof(GameConfig));
@@ -228,41 +239,24 @@ Bool try_rotate_piece_normal(Game* game, RotationAction action) {
     // return: is_successful
     Piece* current_piece = game->current_piece;
     Rotation original_rotation = current_piece->rotation;
-
     int original_shape[4][4];
     memcpy(original_shape, current_piece->shape, sizeof(current_piece->shape));
-
     rotate_piece(current_piece, action);
-    // not I piece
-    if (current_piece->type != I_PIECE) {
-        for (int i = 0; i < 5; i++) {
-            Bool is_successful = try_displace_piece(
-                game,
-                NORMAL_PIECE_NORMAL_SRS[(int)original_rotation][(int)action][i]
-            );
-            if (is_successful) {
-                game->state->is_last_rotate = i + 1;
-                return TRUE;
-            }
+
+    int table[4][2][5][2] = current_piece->type == I_PIECE ? I_PIECE_NORMAL_SRS : NORMAL_PIECE_NORMAL_SRS;
+
+    for (int i = 0; i < 5; i++) {
+        Bool is_successful = try_displace_piece(
+            game,
+            table[(int)original_rotation][(int)action][i]
+        );
+        if (is_successful) {
+            game->state->is_last_rotate = i + 1;
+            return TRUE;
         }
-        current_piece->rotation = original_rotation;
-        memcpy(current_piece->shape, original_shape, sizeof(current_piece->shape));
     }
-    // I piece
-    else {
-        for (int i = 0; i < 5; i++) {
-            Bool is_successful = try_displace_piece(
-                game, 
-                I_PIECE_NORMAL_SRS[(int)original_rotation][(int)action][i]
-            );
-            if (is_successful) {
-                game->state->is_last_rotate = i + 1;
-                return TRUE;
-            }
-        }
-        current_piece->rotation = original_rotation;
-        memcpy(current_piece->shape, original_shape, sizeof(current_piece->shape));
-    }
+    current_piece->rotation = original_rotation;
+    memcpy(current_piece->shape, original_shape, sizeof(current_piece->shape));
     return FALSE;
 }
 
@@ -270,53 +264,33 @@ Bool try_rotate_piece_180(Game* game, RotationAction action) {
     // return: is_successful
     Piece* current_piece = game->current_piece;
     Rotation original_rotation = current_piece->rotation;
-
     int original_shape[4][4];
     memcpy(original_shape, current_piece->shape, sizeof(current_piece->shape));
-
     rotate_piece(current_piece, action);
-    // not I piece
-    if (current_piece->type != I_PIECE) {
-        for (int i = 0; i < 6; i++) {
-            Bool is_successful = try_displace_piece(
-                game, 
-                NORMAL_PIECE_180_SRS[(int)original_rotation][i]
-            );
-            if (is_successful) {
-                game->state->is_last_rotate = i + 1;
-                return TRUE;
-            }
+
+    int kick_cnt = current_piece->type == I_PIECE ? 2 : 6;
+    int table[4][6][2] = current_piece->type == I_PIECE ? I_PIECE_180_SRS : NORMAL_PIECE_180_SRS;
+
+    for (int i = 0; i < kick_cnt; i++) {
+        Bool is_successful = try_displace_piece(
+            game, 
+            table[(int)original_rotation][i]
+        );
+        if (is_successful) {
+            game->state->is_last_rotate = i + 1;
+            return TRUE;
         }
-        current_piece->rotation = original_rotation;
-        memcpy(current_piece->shape, original_shape, sizeof(current_piece->shape));
     }
-    // I piece
-    else {
-        for (int i = 0; i < 2; i++) {
-            Bool is_successful = try_displace_piece(
-                game,
-                I_PIECE_180_SRS[(int)original_rotation][i]
-            );
-            if (is_successful) {
-                game->state->is_last_rotate = i + 1;
-                return TRUE;
-            }
-        }
-        current_piece->rotation = original_rotation;
-        memcpy(current_piece->shape, original_shape, sizeof(current_piece->shape));
-    }
+    current_piece->rotation = original_rotation;
+    memcpy(current_piece->shape, original_shape, sizeof(current_piece->shape));
     return FALSE;
 }
 
 Bool try_rotate_piece(Game* game, RotationAction action) {
     // return: is_successful
     Bool rtn;
-    if (action == ROTATE_180) {
-        rtn = try_rotate_piece_180(game, action);
-    }
-    else {
-        rtn = try_rotate_piece_normal(game, action);
-    }
+    if (action == ROTATE_180) rtn = try_rotate_piece_180(game, action);
+    else rtn = try_rotate_piece_normal(game, action);
     return rtn;
 }
 
@@ -489,13 +463,10 @@ Bool try_hold_piece(Game* game) {
 
 Bool is_t_triple_corner(Game* game) {
     Piece* current_piece = game->current_piece;
-    int corners[4][2] = {
-        {0, 0}, {0, 2}, {2, 0}, {2, 2}
-    };
     int count = 0;
     for (int i = 0; i < 4; i++) {
-        int x = current_piece->x + corners[i][0];
-        int y = current_piece->y - corners[i][1];
+        int x = current_piece->x + T_CORNERS[i][0];
+        int y = current_piece->y - T_CORNERS[i][1];
         if (
             game->board->state[x][y] != 0
             || x < 0
@@ -508,16 +479,10 @@ Bool is_t_triple_corner(Game* game) {
 
 Bool is_t_rect_has_hole(Game* game) {
     Piece* current_piece = game->current_piece;
-    int rects[4][2][2] = {
-        { {0, 0}, {0, 2} },
-        { {0, 2}, {2, 2} },
-        { {2, 0}, {2, 2} },
-        { {0, 0}, {2, 0} }
-    };
     int count = 0;
     for (int i = 0; i < 2; i++) {
-        int x = current_piece->x + rects[(int)current_piece->rotation][i][1];
-        int y = current_piece->y - rects[(int)current_piece->rotation][i][0];
+        int x = current_piece->x + T_RECTS[(int)current_piece->rotation][i][1];
+        int y = current_piece->y - T_RECTS[(int)current_piece->rotation][i][0];
         if (game->board->state[x][y] != 0) count++;
     }
     return count == 1;
