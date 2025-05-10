@@ -2,6 +2,7 @@
 
 #include "board.h"
 #include <stdlib.h>
+#include <string.h>
 
 #define BOARD_WIDTH 10
 #define BOARD_HEIGHT 23

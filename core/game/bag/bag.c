@@ -2,6 +2,7 @@
 
 #include "bag.h"
 #include <stdlib.h>
+#include <string.h>
 
 void shuffle_sequence(PieceType sequence[7]) {
     for (int i = 0; i < 7; i++) {

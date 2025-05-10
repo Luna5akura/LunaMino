@@ -2,6 +2,7 @@
 
 #include "previews.h"
 #include <stdlib.h>
+#include <string.h>
 
 Previews*  init_previews(int length) {
     size_t total_size = sizeof(Previews) + length * sizeof(PieceType);

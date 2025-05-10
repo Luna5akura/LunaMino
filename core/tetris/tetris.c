@@ -1,9 +1,12 @@
 // core/tetris/tetris.c
 
 #include <raylib.h>
+#include <string.h>
 #include <stdlib.h>
 #include <stdio.h>
+#include "tetris_ui/tetris_ui.h"
 #include "tetris.h"
+#include "tetris_history/tetris_history.h"
 
 #define INPUT_LEFT KEY_LEFT
 #define INPUT_RIGHT KEY_RIGHT
@@ -14,52 +17,17 @@
 #define INPUT_ROTATE_180 KEY_A
 #define INPUT_HOLD KEY_C
 #define INPUT_RESTART KEY_R
-
-#define TETRIS_GAME_HEIGHT 20
-
-#define TETRIS_WIDTH 800
-#define TETRIS_HEIGHT 600
-#define TETRIS_BLOCK_SIZE 20
-#define TETRIS_IS_SHADOW_ENABLED TRUE
+#define INPUT_UNDO KEY_Q
 
 #define TETRIS_FPS 60
 #define TETRIS_GRAVITY 1.0f / 60.0f
 #define TETRIS_DAS 100.0f
 #define TETRIS_ARR 0.0f
 #define TETRIS_SOFT_DROP_GRAVITY 20.0f
+#define TETRIS_UNDO_INTERVAL 150.0f
 #define TETRIS_LOCK_DELAY 500.0f
 #define TETRIS_RESET_LOCK_TIMES_LIMIT 15
 
-const char TETRIS_ATK_STR[28][20] = {
-    "",
-    "Single",
-    "Double",
-    "Triple",
-    "Quad",
-    "T-Spin Single Mini",
-    "T-Spin Single",
-    "T-Spin Double Mini",
-    "T-Spin Double",
-    "T-Spin Triple",
-    "I-Spin Single",
-    "I-Spin Double",
-    "I-Spin Triple",
-    "O-Spin Single",
-    "O-Spin Double",
-    "S-Spin Single",
-    "S-Spin Double",
-    "S-Spin Triple",
-    "Z-Spin Single",
-    "Z-Spin Double",
-    "Z-Spin Triple",
-    "L-Spin Single",
-    "L-Spin Double",
-    "L-Spin Triple",
-    "J-Spin Single",
-    "J-Spin Double",
-    "J-Spin Triple",
-    "ERROR",
-};
 
 const int ATK_TABLE[21][9] = {
     {0, 1, 2, 4, 0, 2, 1, 4, 6},
@@ -109,45 +77,8 @@ const int ATK_TABLE_B2B1[21][6] = {
     {30, 6, 18, 12, 30, 42},
 };
 
-Color GetColorForPieceType(int type) {
-    switch (type) {
-        case 0: return GRAY;        //
-        case 1: return SKYBLUE;     // I
-        case 2: return YELLOW;      // O
-        case 3: return PURPLE;      // T
-        case 4: return GREEN;       // S 
-        case 5: return RED;         // Z
-        case 6: return BLUE;        // J
-        case 7: return ORANGE;      // L
-        default: return BLACK;
-    }
-}
-
-void init_window(Tetris* tetris) {
-    int screenWidth = tetris->config->width;
-    int screenHeight = tetris->config->height;
-    InitWindow(screenWidth, screenHeight, "Tetris Game");
-}
-
-void draw_game_over(Tetris* tetris) {
-    DrawText(
-        "Game Over", 
-        tetris->config->width / 2 - MeasureText("Game Over", 40) / 2, 
-        tetris->config->height / 2 - 20, 
-        40, 
-        RED
-    );
-}
-
-void exit_window() {}
-
 TetrisConfig* init_tetris_config(Game* game) {
     TetrisConfig* config = (TetrisConfig*)malloc(sizeof(TetrisConfig));
-
-    config->width = TETRIS_WIDTH;       
-    config->height = TETRIS_HEIGHT;     
-    config->block_size = TETRIS_BLOCK_SIZE;
-    config->is_shadow_enabled = TETRIS_IS_SHADOW_ENABLED;
 
     config->fps = TETRIS_FPS;
     config->gravity = TETRIS_GRAVITY;
@@ -156,6 +87,7 @@ TetrisConfig* init_tetris_config(Game* game) {
     config->soft_drop_gravity = TETRIS_SOFT_DROP_GRAVITY;
     config->drop_interval = 1.0f / (TETRIS_GRAVITY * TETRIS_FPS);
     config->soft_drop_interval = 1.0f / (TETRIS_SOFT_DROP_GRAVITY * TETRIS_FPS);
+    config->undo_interval = TETRIS_UNDO_INTERVAL;
     config->lock_delay = TETRIS_LOCK_DELAY;
     config->reset_lock_times_limit = TETRIS_RESET_LOCK_TIMES_LIMIT;
 
@@ -181,6 +113,7 @@ TetrisState* init_tetris_state(Game* game, TetrisConfig* config) {
     state->das_timer = 0.0f;
     state->arr_timer = 0.0f;
     state->soft_drop_timer = 0.0f;
+    state->undo_timer = 0.0f;
     state->lock_timer = 0.0f;
     state->lock_times_left = config->reset_lock_times_limit;
     state->is_left_pressed = FALSE;
@@ -235,20 +168,6 @@ Tetris* copy_tetris(Tetris* tetris) {
 
     return new_tetris;
 }
-
-void check_integrity(Tetris* tetris) {
-    TetrisConfig* config = tetris->config;
-    TetrisState* state = tetris->state;
-    Game* game = tetris->game;
-    GameConfig* game_config = game->config;
-    GameState* game_state = game->state;
-    Piece* game_piece = game->current_piece;
-    Board* game_board = game->board;
-    Bag* game_bag = game->state->bag;
-    Previews* game_previews = game->state->previews;
-    return;
-}
-
 
 void reset_lock_times_left(Tetris* tetris) {
     tetris->state->lock_times_left = tetris->config->reset_lock_times_limit;
@@ -316,8 +235,8 @@ void detect_left_or_right(Tetris* tetris) {
         int move_count = -1;
 
         while (tetris->state->arr_timer >= tetris->config->arr && is_looping) {
-            if (IsKeyDown(KEY_LEFT)) is_looping = try_move_piece(game, MOVE_LEFT);
-            if (IsKeyDown(KEY_RIGHT)) is_looping = try_move_piece(game, MOVE_RIGHT);
+            if (IsKeyDown(INPUT_LEFT)) is_looping = try_move_piece(game, MOVE_LEFT);
+            if (IsKeyDown(INPUT_RIGHT)) is_looping = try_move_piece(game, MOVE_RIGHT);
             move_count++;
             tetris->state->arr_timer -= tetris->config->arr;
         }
@@ -329,7 +248,7 @@ void detect_left_or_right(Tetris* tetris) {
 void detect_soft_drop(Tetris* tetris) {
     Game* game = tetris->game;
 
-    if (IsKeyPressed(KEY_DOWN)) {
+    if (IsKeyPressed(INPUT_SOFT_DROP)) {
         try_move_piece(game, MOVE_SOFT_DROP);
         tetris->state->soft_drop_timer = 0.0f;
     }
@@ -374,8 +293,21 @@ void detect_hard_drop(Tetris* tetris) {
     tetris->state->is_update_clear_rows_needed = TRUE;
 }
 
+Tetris* detect_undo(Tetris* tetris, TetrisHistory* tetris_history) {
+    if (tetris->state->undo_timer < tetris->config->undo_interval) {
+        tetris->state->undo_timer += GetFrameTime() * 1000;
+        return tetris;
+    }
 
-Tetris* detect_input(Tetris* tetris) {
+    tetris->state->undo_timer = 0.0f;
+    Tetris* pop_tetris = pop_history(tetris_history);
+    if (pop_tetris == NULL) return tetris;
+
+    free_tetris(tetris);
+    return pop_tetris;
+}
+
+Tetris* detect_input(Tetris* tetris, TetrisHistory* tetris_history) {
     if (IsKeyDown(INPUT_LEFT) || IsKeyDown(INPUT_RIGHT)) detect_left_or_right(tetris);
     else tetris->state->das_timer = 0.0f;
     if (IsKeyDown(INPUT_SOFT_DROP)) detect_soft_drop(tetris);
@@ -385,6 +317,7 @@ Tetris* detect_input(Tetris* tetris) {
     if (IsKeyPressed(INPUT_HOLD)) detect_hold(tetris);
     if (IsKeyPressed(INPUT_HARD_DROP)) detect_hard_drop(tetris);
     if (IsKeyDown(INPUT_RESTART)) tetris = restart_game(tetris);
+    if (IsKeyDown(INPUT_UNDO)) tetris = detect_undo(tetris, tetris_history);
     return tetris;
 }
 
@@ -448,299 +381,6 @@ void update_atk(Tetris* tetris) {
     tetris->state->atk_count = get_s2_atk(tetris);
 }
 
-void draw_board(Tetris* tetris) {
-    Game* game = tetris->game;
-
-    int blockSize = tetris->config->block_size;
-    int boardOffsetX = (tetris->config->width - game->board->width * blockSize) / 2;
-    int boardOffsetY = (tetris->config->height - game->board->height * blockSize) / 2;
-    
-    for (int y = 0; y < game->board->height; y++) {
-        for (int x = 0; x < game->board->width; x++) {
-            if (y >= TETRIS_GAME_HEIGHT && game->board->state[x][y] == 0) continue;
-
-            Color color = GetColorForPieceType(game->board->state[x][y]);
-            
-            DrawRectangle(
-                boardOffsetX + x * blockSize, 
-                boardOffsetY + (game->board->height - y - 1) * blockSize, 
-                blockSize, 
-                blockSize, 
-                color
-            );
-
-            DrawRectangleLines(
-                boardOffsetX + x * blockSize, 
-                boardOffsetY + (game->board->height - y - 1) * blockSize, 
-                blockSize, 
-                blockSize, 
-                DARKGRAY
-            );
-        }
-    }
-}
-
-void draw_piece(Tetris* tetris) {
-    Game* game = tetris->game;
-
-    int blockSize = tetris->config->block_size;
-    int boardOffsetX = (tetris->config->width - game->board->width * blockSize) / 2;
-    int boardOffsetY = (tetris->config->height - game->board->height * blockSize) / 2;    
-
-    for (int i = 0; i < 4; i++) {
-        for (int j = 0; j < 4; j++) {
-            if (game->current_piece->shape[i][j] == 0) continue;
-            int x = game->current_piece->x + j;
-            int y = game->current_piece->y - i;
-            if (y < 0) continue;
-
-            Color color = GetColorForPieceType(game->current_piece->type + 1);
-            DrawRectangle(
-                boardOffsetX + x * blockSize, 
-                boardOffsetY + (game->board->height - y - 1) * blockSize, 
-                blockSize, 
-                blockSize, 
-                color
-            );
-            DrawRectangleLines(
-                boardOffsetX + x * blockSize, 
-                boardOffsetY + (game->board->height - y - 1) * blockSize, 
-                blockSize, 
-                blockSize, 
-                DARKGRAY
-            );
-        }
-    }
-}
-
-void draw_previews(Tetris* tetris) {
-    Game* game = tetris->game;
-    int blockSize = tetris->config->block_size;
-    int boardOffsetX = (tetris->config->width - game->board->width * blockSize) / 2;
-    int boardOffsetY = (tetris->config->height - game->board->height * blockSize) / 2;    
-
-    int previewOffsetX = boardOffsetX + (game->board->width + 2) * blockSize;
-    int previewOffsetY = boardOffsetY;
-    for (int p = 0; p < game->config->preview_count; p++) {
-        Piece* preview_piece = init_piece(game->state->previews->previews[(p + game->state->previews->current) % 5]);
-        for (int i = 0; i < 4; i++) {
-            for (int j = 0; j < 4; j++) {
-                if (preview_piece->shape[i][j] != 0) {
-                    Color color = GetColorForPieceType(preview_piece->type + 1);
-                    DrawRectangle(
-                        previewOffsetX + j * blockSize, 
-                        previewOffsetY + p * 4 * blockSize + i * blockSize, 
-                        blockSize, 
-                        blockSize, 
-                        color
-                    );
-                    DrawRectangleLines(
-                        previewOffsetX + j * blockSize, 
-                        previewOffsetY + p * 4 * blockSize + i * blockSize, 
-                        blockSize, 
-                        blockSize, 
-                        DARKGRAY
-                    );
-                }
-            }
-        }
-        free_piece(preview_piece);
-    }
-}
-
-void draw_hold_piece(Tetris* tetris) {
-    Game* game = tetris->game;
-
-    if (game->state->hold_piece == NULL) return;
-    
-    int blockSize = tetris->config->block_size;
-
-    int boardOffsetX = (tetris->config->width - game->board->width * blockSize) / 2;
-    int boardOffsetY = (tetris->config->height - game->board->height * blockSize) / 2;    
-
-    int holdOffsetX = boardOffsetX - (game->board->width + 2) * blockSize / 2;
-    int holdOffsetY = boardOffsetY;
-
-    Piece* hold_piece = game->state->hold_piece;
-    for (int i = 0; i < 4; i++) {
-        for (int j = 0; j < 4; j++) {
-            if (hold_piece->shape[i][j] != 0) {
-                Color color = GetColorForPieceType(hold_piece->type + 1);
-                DrawRectangle(
-                    holdOffsetX + j * blockSize, 
-                    holdOffsetY + i * blockSize, 
-                    blockSize, 
-                    blockSize, 
-                    color
-                );
-                DrawRectangleLines(
-                    holdOffsetX + j * blockSize, 
-                    holdOffsetY + i * blockSize, 
-                    blockSize, 
-                    blockSize, 
-                    DARKGRAY
-                );
-            }
-        }
-    }
-};
-
-void draw_shadow(Tetris* tetris) {
-    Game* game = tetris->game;
-
-    int shadow_height = get_shadow_height(game);
-    if (shadow_height == 0) return;
-
-
-    int blockSize = tetris->config->block_size;
-    int boardOffsetX = (tetris->config->width - game->board->width * blockSize) / 2;
-    int boardOffsetY = (tetris->config->height - game->board->height * blockSize) / 2;    
-
-    for (int i = 0; i < 4; i++) {
-        for (int j = 0; j < 4; j++) {
-            if (game->current_piece->shape[i][j] == 0) continue;
-            int x = game->current_piece->x + j;
-            int y = game->current_piece->y - i;
-            if (y < 0) continue;
-
-            Color color = GetColorForPieceType(game->current_piece->type + 1);
-            color.a /= 3;
-            DrawRectangle(
-                boardOffsetX + x * blockSize, 
-                boardOffsetY + (game->board->height - y - 1 + shadow_height) * blockSize, 
-                blockSize, 
-                blockSize, 
-                color
-            );
-            DrawRectangleLines(
-                boardOffsetX + x * blockSize, 
-                boardOffsetY + (game->board->height - y - 1 + shadow_height) * blockSize, 
-                blockSize, 
-                blockSize, 
-                DARKGRAY
-            );
-        }
-    }
-}
-
-void draw_debug_info(Tetris* tetris) {
-    char buffer[2048];
-
-    snprintf(buffer, 2048,
-        "drop_timer: %.2f\n"
-        "das_timer: %.2f\n"
-        "arr_timer: %.2f\n"
-        "soft_drop_timer: %.2f\n"
-        "lock_timer: %.2f\n"
-        "lock_times_left: %i\n"
-        "is_left_pressed: %i\n"
-        "is_right_pressed: %i\n"
-        "is_soft_drop_pressed: %i\n"
-        "is_grounded: %i\n"
-        "is_update_clear_rows_needed: %i\n"
-        "attack_type: %i\n"
-        "is_pc: %i\n"
-        "current_piece->x: %i\n"
-        "current_piece->y: %i\n"
-        "is_last_rotate: %i\n",
-        tetris->state->drop_timer,
-        tetris->state->das_timer,
-        tetris->state->arr_timer,
-        tetris->state->soft_drop_timer,
-        tetris->state->lock_timer,
-        tetris->state->lock_times_left,
-        tetris->state->is_left_pressed,
-        tetris->state->is_right_pressed,
-        tetris->state->is_soft_drop_pressed,
-        tetris->state->is_grounded,
-        tetris->state->is_update_clear_rows_needed,
-        tetris->state->attack_type,
-        tetris->state->is_pc,
-        tetris->game->current_piece->x,
-        tetris->game->current_piece->y,
-        tetris->game->state->is_last_rotate
-    );
-
-    DrawText(
-        buffer, 
-        10, 
-        10,
-        15, 
-        DARKGRAY
-    );
-}
-
-void draw_attack(Tetris* tetris) {
-    Game* game = tetris->game;
-
-    if (game->state->hold_piece == NULL) return;
-    
-    int blockSize = tetris->config->block_size;
-
-    int boardOffsetX = (tetris->config->width - game->board->width * blockSize) / 2;
-    int boardOffsetY = (tetris->config->height - game->board->height * blockSize) / 2;    
-
-    int atkOffsetX = boardOffsetX - (game->board->width + 2) * blockSize / 2;
-    int atkOffsetY = boardOffsetY + 7 * blockSize;
-
-    char buffer[64];
-
-    char ren_str[16];
-    if (tetris->game->state->ren >= 1) {
-        snprintf(ren_str, 16, "REN: %i", tetris->game->state->ren);
-    } else {
-        ren_str[0] = '\0';
-    }
-
-    char b2b_str[16];
-    if (tetris->state->b2b_count >= 1) {
-        snprintf(b2b_str, 16, "B2B: %i", tetris->state->b2b_count);
-    } else {
-        b2b_str[0] = '\0';
-    }
-
-
-    char atk_str[16];
-    if (tetris->state->atk_count >= 1) {
-        snprintf(atk_str, 16, "ATK: %i", tetris->state->atk_count);
-    } else {
-        atk_str[0] = '\0';
-    }
-
-    snprintf(buffer, 64,
-        "%s\n%s\n%s\n%s\n%s",
-        TETRIS_ATK_STR[tetris->state->attack_type],
-        tetris->state->is_pc ? "Perfect Clear" : "",
-        ren_str,
-        b2b_str,
-        atk_str
-    );
-
-    DrawText(
-        buffer, 
-        atkOffsetX, 
-        atkOffsetY,
-        15,     
-        DARKGRAY
-    );
-}
-
-void draw_content(Tetris* tetris) {
-    BeginDrawing();
-    ClearBackground(RAYWHITE);
-
-    draw_board(tetris);
-    if (tetris->config->is_shadow_enabled) draw_shadow(tetris);
-    draw_piece(tetris);
-    draw_previews(tetris);
-    draw_hold_piece(tetris);
-    draw_attack(tetris);
-
-    draw_debug_info(tetris);
-
-    if (tetris->state->is_game_over) draw_game_over(tetris);
-    EndDrawing();
-}
 
 void update_clear_rows(Tetris* tetris) {
     tetris->state->drop_timer = 0.0f;
@@ -754,7 +394,6 @@ void update_clear_rows(Tetris* tetris) {
     update_ren(game);
     update_atk(tetris);
     tetris->state->is_game_over = next_piece(game);
-    if (tetris->state->is_game_over) draw_game_over(tetris); // ??
     int clear_count = clear_rows(game->board);
     if (clear_count == 0) return;
     if (
@@ -767,16 +406,20 @@ void update_clear_rows(Tetris* tetris) {
 
 void run_game(Game* game) {
     Tetris* tetris = init_tetris(game);
+    UIConfig* ui_config = init_ui_config();
+    TetrisHistory* tetris_history = init_tetris_history(300);
 
-    init_window(tetris);
+    init_window(tetris, ui_config);
     SetTargetFPS(tetris->config->fps);
     while (!WindowShouldClose()) {
-        tetris = detect_input(tetris);
-        if (tetris->state->is_game_over) draw_game_over(tetris); // ??
+        tetris = detect_input(tetris, tetris_history);
         
         update_drop_timer(tetris);
-        if (tetris->state->is_update_clear_rows_needed) update_clear_rows(tetris);
-        draw_content(tetris);
+        if (tetris->state->is_update_clear_rows_needed) {
+            update_clear_rows(tetris);
+            push_history(tetris_history, tetris);
+        }
+        draw_content(tetris, ui_config);
     }
 }
 

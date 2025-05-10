@@ -29,7 +29,7 @@ CONSOLE_OBJECTS = $(CONSOLE_SOURCES:.c=.o)
 
 # Raylib-specific
 RAYLIB_TARGET = tetris-raylib$(EXE_SUFFIX)
-RAYLIB_SOURCES = core/tetris/tetris.c $(COMMON_SOURCES)
+RAYLIB_SOURCES = core/tetris/tetris.c core/tetris/tetris_ui/tetris_ui.c core/tetris/tetris_history/tetris_history.c $(COMMON_SOURCES)
 RAYLIB_OBJECTS = $(RAYLIB_SOURCES:.c=.o)
 
 # Platform-specific LDFLAGS for raylib
