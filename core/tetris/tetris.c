@@ -125,6 +125,7 @@ TetrisState* init_tetris_state(Game* game, TetrisConfig* config) {
     state->is_pc = FALSE;
     state->b2b_count = -1;
     state->atk_count = 0;
+    state->pending_attack = 0;
     state->is_game_over = FALSE;
 
     return state;
@@ -372,13 +373,45 @@ int get_s2_atk(Tetris* tetris) {
     return total_atk;
 }
 
-void update_atk(Tetris* tetris) {
+int get_atk(Tetris* tetris) {
     if (tetris->state->attack_type == ATK_NONE) return;
-    tetris->state->atk_count = get_s2_atk(tetris);
+    return get_s2_atk(tetris);
 }
 
 
+
+void receive_garbage_line(Tetris* tetris, int line_count) {
+    Board* board = tetris->game->board;
+    int hole_column = random() % board->width;
+
+    for (int row = 0; row < board->height - line_count; row++) {
+        for (int col = 0; col < board->width; col++) {
+            board->state[col][row + line_count] = board->state[col][row];
+        }
+    }
+
+    for (int row = 0; row < line_count; row++) {
+        for (int col = 0; col < board->width; col++) {
+            if (col == hole_column) {
+                board->state[col][row] = 0;
+            }
+            else {
+                board->state[col][row] = 8;
+            }
+        }
+    }   
+}
+
+void send_garbage_line(Tetris* tetris, int line_count) {
+    receive_garbage_line(tetris, line_count);
+}
+
+void receive_attack(Tetris* tetris, int attack) {
+    tetris->state->pending_attack += attack;
+}
+
 void update_clear_rows(Tetris* tetris) {
+    int attack;
     tetris->state->drop_timer = 0.0f;
     tetris->state->is_update_clear_rows_needed = FALSE;
 
@@ -388,16 +421,42 @@ void update_clear_rows(Tetris* tetris) {
     tetris->state->attack_type = get_attack_type(game);
     tetris->state->is_pc = is_perfect_clear(game);
     update_ren(game);
-    update_atk(tetris);
+    attack = get_atk(tetris);
+    tetris->state->atk_count = attack;
     tetris->state->is_game_over = next_piece(game);
     int clear_count = clear_rows(game->board);
-    if (clear_count == 0) return;
     if (
         tetris->state->attack_type == ATK_SINGLE 
         || tetris->state->attack_type == ATK_DOUBLE
         || tetris->state->attack_type == ATK_TRIPLE
     ) tetris->state->b2b_count = -1;
     else tetris->state->b2b_count++;
+
+    if (clear_count == 0) {
+        if (tetris->state->pending_attack == 0) return;
+        if (tetris->state->pending_attack > 8) {
+            tetris->state->pending_attack -= 8;
+            receive_garbage_line(tetris, 8);  
+        }
+        else {
+            tetris->state->pending_attack = 0;
+            receive_garbage_line(tetris, tetris->state->pending_attack);
+        }
+    }
+    else {
+        if (tetris->state->pending_attack == 0) {
+            send_garbage_line(tetris, attack);
+        }
+        else {
+            if (attack > tetris->state->pending_attack) {
+                send_garbage_line(tetris, attack - tetris->state->pending_attack);
+                tetris->state->pending_attack = 0;
+            }
+            else {
+                tetris->state->pending_attack -= attack;
+            }
+        }
+    }
 }
 
 void run_game(Game* game) {
