@@ -266,7 +266,8 @@ void draw_debug_info(Tetris* tetris) {
         "current_piece->x: %i\n"
         "current_piece->y: %i\n"
         "is_last_rotate: %i\n"
-        "is_game_over: %i\n",
+        "is_game_over: %i\n"
+        "undo_timer: %.2f\n",
         tetris->state->drop_timer,
         tetris->state->das_timer,
         tetris->state->arr_timer,
@@ -283,7 +284,8 @@ void draw_debug_info(Tetris* tetris) {
         tetris->game->current_piece->x,
         tetris->game->current_piece->y,
         tetris->game->state->is_last_rotate,
-        tetris->state->is_game_over
+        tetris->state->is_game_over,
+        tetris->state->undo_timer
     );
 
     DrawText(

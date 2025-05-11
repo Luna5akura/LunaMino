@@ -294,15 +294,11 @@ void detect_hard_drop(Tetris* tetris) {
 }
 
 Tetris* detect_undo(Tetris* tetris, TetrisHistory* tetris_history) {
-    if (tetris->state->undo_timer < tetris->config->undo_interval) {
-        tetris->state->undo_timer += GetFrameTime() * 1000;
-        return tetris;
-    }
-
+    if (tetris->state->undo_timer * 1000 < tetris->config->undo_interval)return tetris;
     tetris->state->undo_timer = 0.0f;
     Tetris* pop_tetris = pop_history(tetris_history);
     if (pop_tetris == NULL) return tetris;
-
+    pop_tetris->state->undo_timer = 0.0f;
     free_tetris(tetris);
     return pop_tetris;
 }
@@ -415,6 +411,7 @@ void run_game(Game* game) {
         tetris = detect_input(tetris, tetris_history);
         
         update_drop_timer(tetris);
+        tetris->state->undo_timer += GetFrameTime();
         if (tetris->state->is_update_clear_rows_needed) {
             update_clear_rows(tetris);
             push_history(tetris_history, tetris);

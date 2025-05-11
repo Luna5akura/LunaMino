@@ -30,6 +30,7 @@ Tetris* pop_history(TetrisHistory* history) {
     }
 
     Tetris* tetris = history->tetris_histories[history->current];
+    if (tetris == NULL) return NULL;
     history->tetris_histories[history->current] = NULL;
     history->current = (history->current - 1 + history->length) % history->length;
 
