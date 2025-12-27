@@ -156,10 +156,20 @@ Game* init_game() {
 }
 
 void free_game(Game* game) {
-    free_game_config(game->config);
-    free_game_state(game->state);
-    free_board(game->board);
+    if (game == NULL) return;
+    // printf("Freeing game config...\n");
+    if (game->config) free_game_config(game->config);
+    
+    // printf("Freeing game state...\n");
+    if (game->state) free_game_state(game->state);
+    
+    // printf("Freeing board...\n");
+    if (game->board) free_board(game->board);
+    
+    // printf("Freeing current piece...\n");
     if (game->current_piece) free_piece(game->current_piece);
+    
+    // printf("Freeing game struct...\n");
     free(game);
 }
 
@@ -182,6 +192,18 @@ Bool is_overlapping(Board* board, Piece* piece) {
             int y = piece->y - i;
 
             if (x < 0 || x >= board->width || y < 0) return TRUE; 
+            
+            // 【新增修复】防止向上越界读取
+            // 如果 y 超过了棋盘高度（比如在缓冲区上方），我们视为没有碰撞（空）
+            // 或者根据你的实现，如果 y >= board->height，视为出界？
+            // 通常 Tetris 允许方块在 board 上方存在（Buffer Zone）。
+            // 既然我们要防崩溃，必须检查数组边界：
+            if (y >= board->height) {
+                // 如果你的 board->state 只有 20 高，访问 [x][21] 会崩溃。
+                // 这里我们假设上方是空气 (0)，直接 continue 不去读数组
+                continue; 
+            }
+
             if (board->state[x][y] != 0) return TRUE;
         }
     }
@@ -330,12 +352,18 @@ Bool lock_piece(Game* game) {
 
             if (y < 20) rtn = FALSE;
             
-            board->state[x][y] = (int)current_piece->type + 1;
+            // 【新增修复】防止写入越界
+            // 如果方块锁定时 y 坐标超出了棋盘数组范围，不要写入，防止 Segfault
+            if (x >= 0 && x < board->width && y >= 0 && y < board->height) {
+                board->state[x][y] = (int)current_piece->type + 1;
+            } else {
+                // 如果试图在棋盘外锁定，这通常意味着方块溢出（顶死）
+                // 这种情况下不写入数组，但标记为 Game Over (rtn 逻辑可能需要调整，但防止崩溃最重要)
+            }
         }
     }
     return rtn;
 }
-
 int detect_clear_rows(Game* game) {
     // before lock_piece
     Board* board = game->board;

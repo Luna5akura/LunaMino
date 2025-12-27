@@ -1,67 +1,82 @@
-# Compiler and flags
+# ==========================================
+# Tetris Project Makefile (Updated)
+# ==========================================
 CC = gcc
-CFLAGS = -Wall -g
+# 编译选项: 添加 -g for debug if needed
+CFLAGS = -Wall -O3 -fPIC -march=native
+# 头文件路径 (添加 core/battle if needed)
+INCLUDE = -Icore/board -Icore/game -Icore/piece -Iutil -Iai -Icore/tetris -Icore/battle -Icore/console
 
-# Include directories
-INCLUDE = -Icore/board -Icore/game -Icore/piece -Iutil
+# 核心源文件 (包含所有逻辑 + 新接口 in game.c)
+LOGIC_SOURCES = core/board/board.c \
+                core/game/game.c \
+                core/game/bag/bag.c \
+                core/game/previews/previews.c \
+                core/piece/piece.c \
+                util/util.c \
+                core/tetris/tetris.c \
+                core/tetris/tetris_ui/tetris_ui.c
 
-# Common source files
-COMMON_SOURCES = core/board/board.c core/game/game.c core/piece/piece.c util/util.c core/game/bag/bag.c core/game/previews/previews.c
+COMMON_SOURCES = core/board/board.c \
+core/game/game.c \
+core/game/bag/bag.c \
+core/game/previews/previews.c \
+core/piece/piece.c \
+util/util.c \
+core/tetris/tetris.c \
+core/tetris/tetris_ui/tetris_ui.c \
+core/tetris/tetris_history/tetris_history.c \
+core/battle/battle.c \
+core/console/console.c
 
-# Detect OS
-OS := $(shell uname -s 2>/dev/null || echo Windows)
+# Bridge for AI: 如果添加 ai/bridge.c, 包含在这里; 否则 game.c 已足够
 
-# Add .exe extension for Windows
-ifeq ($(OS),Windows)
-    EXE_SUFFIX = .exe
-    RM = del /Q
-    FIXPATH = $(subst /,\,$1)
-else
-    EXE_SUFFIX =
-    RM = rm -f
-    FIXPATH = $1
-endif
+# 目标文件名
+SHARED_LIB = libtetris.so
+RAYLIB_EXE = tetris-raylib
+CONSOLE_EXE = tetris-console
+TRAIN_EXE = tetris-train  # 如果有C训练入口，可添加
+# 链接选项
+SHARED_LDFLAGS = -shared -lm -lraylib
+# Raylib 链接 (调整为您的系统)
+RAYLIB_LDFLAGS = -lraylib -lm -lpthread -ldl -lrt
+# ==========================================
+# Build Targets
+# ==========================================
+all: shared raylib console
 
-# Console-specific
-CONSOLE_TARGET = tetris-console$(EXE_SUFFIX)
-CONSOLE_SOURCES = core/console/console.c $(COMMON_SOURCES)
-CONSOLE_OBJECTS = $(CONSOLE_SOURCES:.c=.o)
+BRIDGE_SOURCES = $(LOGIC_SOURCES)  # Override for shared
+BRIDGE_OBJECTS = $(BRIDGE_SOURCES:.c=.o)
 
-# Raylib-specific
-RAYLIB_TARGET = tetris-raylib$(EXE_SUFFIX)
-RAYLIB_SOURCES = core/tetris/tetris.c core/tetris/tetris_ui/tetris_ui.c core/tetris/tetris_history/tetris_history.c $(COMMON_SOURCES)
-RAYLIB_OBJECTS = $(RAYLIB_SOURCES:.c=.o)
+# 编译共享库的目标文件规则
+shared: SHARED_CFLAGS = $(CFLAGS) -DSHARED_LIB=1
+shared: $(BRIDGE_OBJECTS)
+	@echo "Building Shared Library for Python..."
+	$(CC) $(SHARED_CFLAGS) $(BRIDGE_OBJECTS) -o $(SHARED_LIB) $(SHARED_LDFLAGS)
+	@echo "Done: $(SHARED_LIB)"
 
-# Platform-specific LDFLAGS for raylib
-ifeq ($(OS),Windows)
-    RAYLIB_LDFLAGS = -lraylib -lopengl32 -lgdi32 -lwinmm
-else
-    RAYLIB_LDFLAGS = -lraylib -lm -lpthread -ldl -lrt
-endif
+core/tetris/tetris.o: core/tetris/tetris.c
+	$(CC) $(CFLAGS) -DSHARED_LIB=1 -c $< -o $@
 
-# Default target: build both
-all: $(CONSOLE_TARGET) $(RAYLIB_TARGET)
+# 2. 编译 Raylib 游戏版本
+raylib:
+	@echo "Building Raylib Game..."
+	$(CC) $(CFLAGS) $(INCLUDE) $(COMMON_SOURCES) -o $(RAYLIB_EXE) $(RAYLIB_LDFLAGS)
+	@echo "Done: $(RAYLIB_EXE)"
 
-# Console target
-$(CONSOLE_TARGET): $(CONSOLE_OBJECTS)
-	$(CC) $(CONSOLE_OBJECTS) -o $(call FIXPATH,$(CONSOLE_TARGET))
+# 3. 编译控制台测试版
+console:
+	@echo "Building Console Test..."
+	$(CC) $(CFLAGS) $(INCLUDE) $(COMMON_SOURCES) -o $(CONSOLE_EXE) -lm
+	@echo "Done: $(CONSOLE_EXE)"
 
-# Raylib target
-$(RAYLIB_TARGET): $(RAYLIB_OBJECTS)
-	$(CC) $(RAYLIB_OBJECTS) -o $(call FIXPATH,$(RAYLIB_TARGET)) $(RAYLIB_LDFLAGS)
-
-# Object file rules
+# 编译通用的 .o 文件规则
 %.o: %.c
-	$(CC) $(CFLAGS) $(INCLUDE) -c $< -o $(call FIXPATH,$@)
+	$(CC) $(CFLAGS) $(INCLUDE) -c $< -o $@
 
-# Clean up
+# 清理
 clean:
-	@echo "Cleaning object files and targets..."
-	$(RM) $(call FIXPATH,$(CONSOLE_OBJECTS)) $(call FIXPATH,$(RAYLIB_OBJECTS)) $(call FIXPATH,$(CONSOLE_TARGET)) $(call FIXPATH,$(RAYLIB_TARGET))
+	rm -f $(BRIDGE_OBJECTS) $(SHARED_LIB) $(RAYLIB_EXE) $(CONSOLE_EXE)
+	rm -f core/board/*.o core/game/*.o core/piece/*.o util/*.o ai/*.o core/tetris/*.o core/battle/*.o core/console/*.o
 
-# Phony targets
-.PHONY: all clean console raylib
-
-# Convenience targets for building individually
-console: $(CONSOLE_TARGET)
-raylib: $(RAYLIB_TARGET)
+.PHONY: all shared raylib console clean

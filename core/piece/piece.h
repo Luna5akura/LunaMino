@@ -26,6 +26,8 @@ typedef struct {
     int shape[4][4];  // 0 is empty, 1 is filled
 } Piece;
 
+extern const int PIECE_SHAPES[7][4][4][4];
+
 Piece* init_piece(PieceType type);
 void free_piece(Piece* piece);
 Piece* copy_piece(Piece* piece);
@@ -34,3 +36,5 @@ void displace_piece(Piece* piece, const int direction[2]);
 void rotate_piece(Piece* piece, RotationAction action);
 
 #endif
+
+

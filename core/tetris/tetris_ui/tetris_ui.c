@@ -5,14 +5,6 @@
 #include <stdio.h>
 #include "tetris_ui.h"
 
-#define UI_GAME_HEIGHT 20
-
-#define UI_WIDTH 800
-#define UI_HEIGHT 600
-#define UI_BLOCK_SIZE 20
-#define UI_IS_SHADOW_ENABLED TRUE
-
-
 const char TETRIS_ATK_STR[28][20] = {
     "",
     "Single",

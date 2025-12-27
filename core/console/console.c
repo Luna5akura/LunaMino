@@ -93,19 +93,19 @@ void handle_input(Game* game) {
     }
 }
 
-int main() {
-    srandom(0);
-    Game* game = init_game(FALSE);
+// int main() {
+//     srandom(0);
+//     Game* game = init_game(FALSE);
 
-    printf("Tetris Console Test\n");
-    printf("Controls: a (left), d (right), s (down), w (hard drop), q (rotate CW), e (rotate CCW), r (rotate 180), n (next piece), x (exit)\n");
+//     printf("Tetris Console Test\n");
+//     printf("Controls: a (left), d (right), s (down), w (hard drop), q (rotate CW), e (rotate CCW), r (rotate 180), n (next piece), x (exit)\n");
 
-    while (1) {
-        print_board(game);
-        printf("Enter action: ");
-        handle_input(game);
-        clear_rows(game->board); 
-    }
+//     while (1) {
+//         print_board(game);
+//         printf("Enter action: ");
+//         handle_input(game);
+//         clear_rows(game->board); 
+//     }
 
-    return 0;
-}
+//     return 0;
+// }

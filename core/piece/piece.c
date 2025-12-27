@@ -3,6 +3,7 @@
 #include "piece.h"
 #include <stdlib.h>
 #include <string.h>
+#include <stdio.h> // for printf
 
 const int PIECE_SHAPES[7][4][4][4] = {
     // I_PIECE
@@ -221,6 +222,14 @@ const int PIECE_SHAPES[7][4][4][4] = {
 };
 
 Piece* init_piece(PieceType type) {
+    // 【安全检查】防止数组越界导致 Segfault
+    if (type < 0 || type > 6) {
+        printf("[C-Error] init_piece received invalid type: %d\n", type);
+        // 返回一个默认值 (例如 T块) 或者 NULL
+        // 这里为了防止后续代码崩溃，强制修正为 0 (I_PIECE)
+        type = (PieceType)0; 
+    }
+
     Piece* piece = (Piece*)malloc(sizeof(Piece));
     if (piece == NULL) {
         exit(1);
@@ -240,10 +249,11 @@ Piece* init_piece(PieceType type) {
 }
 
 void free_piece(Piece* piece) {
-    free(piece);
+    if (piece) free(piece);
 }
 
 Piece* copy_piece(Piece* piece) {
+    if (piece == NULL) return NULL;
     Piece* new_piece = (Piece*)malloc(sizeof(Piece));
     if (new_piece == NULL) {
         exit(1);
@@ -295,11 +305,13 @@ void rotate_piece(Piece* piece, RotationAction action) {
             break;
     }
     
+    // 【安全检查】虽然理论上不会，但防止 rotation 越界
+    if (new_rotation < 0) new_rotation = 0;
+    
     memcpy(
         piece->shape, 
-        PIECE_SHAPES[(int)piece->type][(int)new_rotation], 
-        sizeof(PIECE_SHAPES[(int)piece->type][(int)new_rotation])
+        PIECE_SHAPES[(int)piece->type][new_rotation], 
+        sizeof(PIECE_SHAPES[(int)piece->type][new_rotation])
     );
     piece->rotation = new_rotation;
 }
-
