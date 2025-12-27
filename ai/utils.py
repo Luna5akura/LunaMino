@@ -1,3 +1,5 @@
+# ai/utils.py
+
 import ctypes
 import os
 import random
@@ -23,7 +25,7 @@ class MacroAction(ctypes.Structure):
 class LegalMoves(ctypes.Structure):
     _fields_ = [
         ("count", ctypes.c_int),
-        ("moves", MacroAction * 100) # MAX_LEGAL_MOVES
+        ("moves", MacroAction * 200) # MAX_LEGAL_MOVES
     ]
 
 class StepResult(ctypes.Structure):

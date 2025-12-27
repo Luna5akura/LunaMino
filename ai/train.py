@@ -1,31 +1,30 @@
+# ai/train.py
 import torch
 import torch.nn.functional as F
 import torch.optim as optim
 import numpy as np
 import random
 import os
-import pickle  # 用于保存经验池
+import sys
+import pickle
+import shutil
 from collections import deque
+
 from .utils import TetrisGame
 from .model import TetrisNet
 from .mcts import MCTS
+from .reward import get_reward
+from . import config # 引入统一配置
 
-# Config
-BATCH_SIZE = 64
-LR = 0.001
-MEMORY_SIZE = 10000
-MCTS_SIMS = 30
-DEVICE = 'cuda' if torch.cuda.is_available() else 'cpu'
-CHECKPOINT_FILE = "tetris_checkpoint.pth"
-MEMORY_FILE = "tetris_memory.pkl"
+def normalize_score(score):
+    return np.tanh(score / 50.0)
 
-
-def battle_simulation(net, mcts_sims=100, render=False): # 增加sims，开启渲染选项
+def battle_simulation(net, mcts_sims, render=False):
     game = TetrisGame()
     if render:
         game.enable_render()
 
-    mcts = MCTS(net, device=DEVICE, num_simulations=mcts_sims)
+    mcts = MCTS(net, device=config.DEVICE, num_simulations=mcts_sims)
     
     training_data = []
     steps = 0
@@ -34,161 +33,148 @@ def battle_simulation(net, mcts_sims=100, render=False): # 增加sims，开启�
     while True:
         if render: game.render()
         
-        # MCTS
         root = mcts.run(game)
         
-        # 温度系数控制：前30步探索，后面利用
-        temp = 1.0 if steps < 30 else 0.5 
+        # 观看模式下，温度系数可以设低一点，看它最好的表现
+        # 或者保持随机性以收集数据
+        temp = 0.5 
         action_probs = mcts.get_action_probs(root, temp=temp)
         
-        # 记录数据
         board, ctx, p_type = game.get_state()
         training_data.append([board, ctx, p_type, action_probs, None])
         
         action_idx = np.random.choice(len(action_probs), p=action_probs)
         
-        # 解码
         use_hold = 0
         if action_idx >= 40:
             use_hold = 1
-            action_idx -= 40 # 变回 0-39
+            action_idx -= 40
             
-        x = action_idx // 4
-        rot = action_idx % 4
-        
-        # 执行
-        res = game.step(x, rot, use_hold)
+        res = game.step(action_idx // 4, action_idx % 4, use_hold)
         if render: game.render()
         
-        # --- 奖励函数优化 ---
-        step_reward = 0.01 # 生存奖励
-        if res['lines_cleared'] > 0:
-            step_reward += res['lines_cleared'] * 0.2
-        if res['damage_sent'] > 0:
-            step_reward += res['damage_sent'] * 1.0
-        if res['game_over']:
-            step_reward -= 1.0
+        # --- 关键修改 ---
+        # 传入 is_training=False，禁用“强制空洞结束”
+        # 这样即使 AI 玩崩了，也会继续挣扎，直到真正死亡
+        next_board, _, _ = game.get_state()
+        step_reward, force_over = get_reward(res, next_board, steps, is_training=False)
+
+        # 在 Eval 模式下，忽略 force_over 标记
+        # 只有真正的 game_over 才会结束
         
         total_score += step_reward
         steps += 1
         
-        if res['game_over'] or steps > 500:
+        # 使用 EVAL 的最大步数 (50000)，解决提前结束问题
+        if res['game_over'] or steps > config.MAX_STEPS_EVAL:
             break
             
-    # Value Target 计算
-    final_value = total_score
-    # 简单的归一化 (-1 到 1)
-    if final_value > 10: final_value = 1.0
-    elif final_value < -1: final_value = -1.0
-    else: final_value = final_value / 10.0
-    
-    processed_data = []
+    final_value = normalize_score(total_score)
     for item in training_data:
         item[4] = final_value
-        processed_data.append(item)
         
     if render:
-        game.close_render() # 记得关闭窗口
+        game.close_render()
         
-    return processed_data, total_score
+    return training_data, total_score
 
 def save_checkpoint(net, optimizer, memory, game_idx):
-    print(f"\n[Saving] Saving checkpoint to {CHECKPOINT_FILE}...")
+    # 复用 mp_train 类似的保存逻辑，但单机版通常不需要备份，
+    # 或者如果这是专门用来微调的，也可以加上备份逻辑
+    print(f"\n[Saving] Saving checkpoint to {config.CHECKPOINT_FILE}...")
     torch.save({
         'model_state_dict': net.state_dict(),
         'optimizer_state_dict': optimizer.state_dict(),
         'game_idx': game_idx
-    }, CHECKPOINT_FILE)
+    }, config.CHECKPOINT_FILE)
     
-    print(f"[Saving] Saving memory ({len(memory)} items) to {MEMORY_FILE}...")
-    with open(MEMORY_FILE, 'wb') as f:
-        pickle.dump(memory, f)
+    # 简单的覆盖保存 memory
+    try:
+        with open(config.MEMORY_FILE, 'wb') as f:
+            pickle.dump(memory, f)
+    except Exception as e:
+         print(f"[Error] Failed to save memory: {e}")
+         
+    # 单机版训练较慢，每 100 局备份一次即可
+    if game_idx % 100 == 0:
+        backup_path = os.path.join(config.BACKUP_DIR, f"single_ckpt_{game_idx}.pth")
+        try:
+            shutil.copy(config.CHECKPOINT_FILE, backup_path)
+            print(f"[Backup] Saved to {backup_path}")
+        except: pass
+
     print("[Saving] Done.")
 
 def load_checkpoint(net, optimizer):
     start_idx = 0
-    memory = deque(maxlen=MEMORY_SIZE)
+    memory = deque(maxlen=config.MEMORY_SIZE)
     
-    if os.path.exists(CHECKPOINT_FILE):
-        print(f"[Loading] Found checkpoint {CHECKPOINT_FILE}, loading...")
-        checkpoint = torch.load(CHECKPOINT_FILE)
-        net.load_state_dict(checkpoint['model_state_dict'])
-        optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
-        start_idx = checkpoint['game_idx']
-        print(f"[Loading] Resuming from Game {start_idx}")
-    else:
-        print("[Loading] No checkpoint found, starting from scratch.")
-
-    if os.path.exists(MEMORY_FILE):
-        print(f"[Loading] Found memory file {MEMORY_FILE}, loading...")
+    if os.path.exists(config.CHECKPOINT_FILE):
+        print(f"[Loading] Found checkpoint {config.CHECKPOINT_FILE}...")
         try:
-            with open(MEMORY_FILE, 'rb') as f:
-                loaded_memory = pickle.load(f)
-                memory.extend(loaded_memory)
-            print(f"[Loading] Restored {len(memory)} experiences.")
+            checkpoint = torch.load(config.CHECKPOINT_FILE, map_location=config.DEVICE)
+            net.load_state_dict(checkpoint['model_state_dict'])
+            optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+            start_idx = checkpoint['game_idx']
+            print(f"[Loading] Resuming from Game {start_idx}")
         except Exception as e:
-            print(f"[Loading] Failed to load memory: {e}")
+            print(f"[Error] Corrupted: {e}")
+    else:
+        print("[Warning] No checkpoint found. Starting from scratch.")
+
+    if os.path.exists(config.MEMORY_FILE):
+        try:
+            with open(config.MEMORY_FILE, 'rb') as f:
+                memory.extend(pickle.load(f))
+            print(f"[Loading] Restored {len(memory)} experiences.")
+        except: pass
             
     return start_idx, memory
 
 def train():
-    net = TetrisNet().to(DEVICE)
-    optimizer = optim.Adam(net.parameters(), lr=LR)
+    net = TetrisNet().to(config.DEVICE)
+    optimizer = optim.Adam(net.parameters(), lr=config.LR)
     
-    # --- 断点续训逻辑 ---
     game_idx, memory = load_checkpoint(net, optimizer)
     
-    print(f"Starting training on {DEVICE}...")
+    print(f"Starting Single Process Training on {config.DEVICE}...")
     
     try:
         while True:
-            # 渲染策略：前5局渲染，之后每100局渲染一次
-            do_render = (game_idx < 5) or (game_idx % 100 == 0)
-
-            do_render = True
+            # 默认开启渲染，因为单机版主要目的就是为了看
+            do_render = True 
             
-            # 运行游戏
-            new_data, score = battle_simulation(net, mcts_sims=MCTS_SIMS, render=do_render)
+            # 使用 config.MCTS_SIMS_EVAL (通常比训练时高，比如 50 或 100)
+            new_data, score = battle_simulation(net, mcts_sims=config.MCTS_SIMS_EVAL, render=do_render)
             memory.extend(new_data)
             
             game_idx += 1
-            print(f"Game {game_idx}: Score = {score:.2f}, Memory = {len(memory)}")
+            print(f"Game {game_idx}: Score = {score:.2f}, Steps = {len(new_data)}")
             
-            if len(memory) < BATCH_SIZE:
+            if len(memory) < config.BATCH_SIZE:
                 continue
                 
-            # 训练步
-            batch = random.sample(memory, BATCH_SIZE)
+            batch = random.sample(memory, config.BATCH_SIZE)
             
-            b_board = torch.tensor(np.array([x[0] for x in batch]), dtype=torch.float32).to(DEVICE)
-            b_ctx = torch.tensor(np.array([x[1] for x in batch]), dtype=torch.float32).to(DEVICE)
-            b_ptype = torch.tensor(np.array([x[2] for x in batch]), dtype=torch.long).to(DEVICE)
-            b_policy = torch.tensor(np.array([x[3] for x in batch]), dtype=torch.float32).to(DEVICE)
-            b_value = torch.tensor(np.array([x[4] for x in batch]), dtype=torch.float32).unsqueeze(1).to(DEVICE)
+            b_board = torch.tensor(np.array([x[0] for x in batch]), dtype=torch.float32).to(config.DEVICE)
+            b_ctx = torch.tensor(np.array([x[1] for x in batch]), dtype=torch.float32).to(config.DEVICE)
+            b_ptype = torch.tensor(np.array([x[2] for x in batch]), dtype=torch.long).to(config.DEVICE)
+            b_policy = torch.tensor(np.array([x[3] for x in batch]), dtype=torch.float32).to(config.DEVICE)
+            b_value = torch.tensor(np.array([x[4] for x in batch]), dtype=torch.float32).unsqueeze(1).to(config.DEVICE)
             
             optimizer.zero_grad()
-            p_logits, v_pred = net(b_board, b_ctx, b_ptype)
-            
-            log_probs = F.log_softmax(p_logits, dim=1)
-            policy_loss = -torch.sum(b_policy * log_probs, dim=1).mean()
-            value_loss = F.mse_loss(v_pred, b_value)
-            
-            loss = policy_loss + value_loss
+            p, v = net(b_board, b_ctx, b_ptype)
+            loss = -torch.sum(b_policy * F.log_softmax(p, dim=1), dim=1).mean() + F.mse_loss(v, b_value)
             loss.backward()
             optimizer.step()
             
-            if game_idx % 10 == 0:
-                print(f"  Loss: {loss.item():.4f} (P: {policy_loss.item():.4f}, V: {value_loss.item():.4f})")
-                
-            # 自动保存 (每50局存一次)
-            if game_idx % 50 == 0:
+            # 自动保存
+            if game_idx % 20 == 0:
                 save_checkpoint(net, optimizer, memory, game_idx)
                 
     except KeyboardInterrupt:
-        print("\n\n[Interrupt] Ctrl+C detected! Saving progress before exit...")
+        print("\n[Interrupt] Saving...")
         save_checkpoint(net, optimizer, memory, game_idx)
-        print("[Interrupt] Safe exit completed.")
 
 if __name__ == "__main__":
-    print(f'{DEVICE=}')
     train()

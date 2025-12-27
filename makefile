@@ -3,6 +3,9 @@
 # ==========================================
 CC = gcc
 # 编译选项: 添加 -g for debug if needed
+# CFLAGS = -Wall -O1 -fPIC -g -fsanitize=address -fno-omit-frame-pointer
+
+
 CFLAGS = -Wall -O3 -fPIC -march=native
 # 头文件路径 (添加 core/battle if needed)
 INCLUDE = -Icore/board -Icore/game -Icore/piece -Iutil -Iai -Icore/tetris -Icore/battle -Icore/console
