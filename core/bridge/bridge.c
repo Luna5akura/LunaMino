@@ -85,7 +85,7 @@ static void run_bfs_for_current_piece(Game* game, int use_hold, LegalMoves* out_
             if (success) {
                 if (p->x < 0 || p->x >= 10 || p->y < 0 || p->y >= 40) continue;
                 int index = p->rotation * 10 * 40 + p->x * 40 + p->y;
-                if (index < 0 || index >= 4 * 10 * 40) continue; // Safety check
+                if (index < 0 || index >= 4 * 10 * 40) continue; // Safety
                 if (!visited[index]) {
                     visited[index] = true;
                     bfs_push(&q, p->x, p->y, p->rotation);
@@ -154,7 +154,7 @@ void ai_get_legal_moves(const Tetris* tetris, LegalMoves* out_moves) {
         piece_get_spawn_pos(old_type, &temp_game.current_piece.x, &temp_game.current_piece.y);
     }
 }
-StepResult ai_step(Tetris* tetris, int x, int rotation, int use_hold) {
+StepResult ai_step(Tetris* tetris, int x, int y, int rotation, int use_hold) {
     StepResult result = {0};
     Game* game = &tetris->game;
     if (tetris->state.is_game_over) {
@@ -165,24 +165,25 @@ StepResult ai_step(Tetris* tetris, int x, int rotation, int use_hold) {
     Piece* p = &game->current_piece;
     p->rotation = rotation % 4;
     p->x = x;
-    game_try_move(game, MOVE_HARD_DROP);
+    p->y = y; 
+    if (board_piece_overlaps(&game->board, p)) {
+        result.is_game_over = true; 
+        return result;
+    }
+    place_piece(&game->board, p);
     tetris->state.attack_type = game_get_attack_type(game);
     tetris->state.is_pc = game_is_perfect_clear(game);
     int atk = tetris_get_atk(tetris);
     result.attack_type = tetris->state.attack_type;
-    game_next_step(game);
-    result.lines_cleared = clear_rows(&game->board); // assume returns cleared
-    if (result.lines_cleared > 0) game->state.ren++;
-    else game->state.ren = -1;
+    result.lines_cleared = clear_rows(&game->board);
+    game->state.ren = (result.lines_cleared > 0) ? game->state.ren + 1 : -1;
     result.combo_count = game->state.ren;
-    // b2b
     if (result.attack_type != ATK_NONE && result.attack_type != ATK_SINGLE && result.attack_type != ATK_DOUBLE && result.attack_type != ATK_TRIPLE) {
         tetris->state.b2b_count++;
     } else if (result.attack_type != ATK_NONE) {
         tetris->state.b2b_count = -1;
     }
     result.b2b_count = tetris->state.b2b_count;
-    // damage
     if (result.lines_cleared > 0) {
         if (tetris->state.pending_attack > 0) {
             if (atk > tetris->state.pending_attack) {
@@ -202,11 +203,19 @@ StepResult ai_step(Tetris* tetris, int x, int rotation, int use_hold) {
             tetris_receive_garbage_line(tetris, p);
         }
     }
+    PieceType type = previews_next(&game->state.previews, bag_next(&game->state.bag));
+    piece_init(&game->current_piece, type);
+    piece_get_spawn_pos(type, &game->current_piece.x, &game->current_piece.y);
+    game->state.can_hold_piece = true;
+    game->state.is_last_rotate = 0;
+    if (board_piece_overlaps(&game->board, &game->current_piece)) {
+        game->is_game_over = true;
+    }
     result.is_game_over = game->is_game_over;
     return result;
 }
 void ai_receive_garbage(Tetris* tetris, int lines) {
-    tetris_receive_attack(tetris, lines);
+    tetris_receive_garbage_line(tetris, lines);  // 修改为直接添加垃圾行
 }
 static UIConfig* ai_ui_config = NULL;
 void ai_enable_visualization(Tetris* tetris) {

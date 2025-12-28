@@ -1,26 +1,28 @@
 # ai/mcts.py
+
 import math
 import numpy as np
 import torch
 from .utils import TetrisGame
+from . import config  # 引入 config 以用 MCTS_C_PUCT
 
 class MCTSNode:
     def __init__(self, parent=None, prior=0):
         self.parent = parent
-        self.children = {} # Map move_index -> MCTSNode
+        self.children = {}  # Map relative_idx (0 to len-1) -> MCTSNode
         self.visit_count = 0
         self.value_sum = 0
-        self.prior = prior # P(s, a) from neural net
+        self.prior = prior  # P(s, a) from neural net
         self.is_expanded = False
-    
+        self.legal_moves = None  # 新增: 存储当前状态的 legal_moves
+
     @property
     def value(self):
         if self.visit_count == 0:
             return 0
         return self.value_sum / self.visit_count
 
-    def ucb_score(self, c_puct=1.0):
-        # 避免除以0
+    def ucb_score(self, c_puct=config.MCTS_C_PUCT):  # 从 config 取，增强探索
         u = c_puct * self.prior * math.sqrt(self.parent.visit_count) / (1 + self.visit_count)
         return self.value + u
 
@@ -36,12 +38,12 @@ class MCTS:
         
         # 1. Expand root immediately
         self._expand_node(root, game_state)
-
         legal_count = len(root.children)
         if legal_count > 0:
-            noise = np.random.dirichlet([0.3] * legal_count)
-            epsilon = 0.25 # 25% 的决策由噪声决定
-            for i, (idx, child) in enumerate(root.children.items()):
+            noise = np.random.dirichlet([1.0] * legal_count)
+            epsilon = 0.5  # 25% 噪声
+            for i in range(legal_count):
+                child = root.children[i]
                 child.prior = (1 - epsilon) * child.prior + epsilon * noise[i]
         
         for _ in range(self.num_simulations):
@@ -55,18 +57,12 @@ class MCTS:
                 action_idx, node = max(node.children.items(), key=lambda item: item[1].ucb_score())
                 path.append(node)
                 
-                # --- [修复] 解码动作索引 (0-79) ---
-                use_hold = 0
-                decoded_idx = action_idx
-                if decoded_idx >= 40:
-                    use_hold = 1
-                    decoded_idx -= 40
+                # 新: 从 parent (path[-2]) 的 legal_moves 取 move
+                parent = path[-2]
+                move = parent.legal_moves[action_idx]
                 
-                x = decoded_idx // 4
-                rot = decoded_idx % 4
-                
-                # --- [修复] 传递 use_hold 参数 ---
-                res = sim_game.step(x, rot, use_hold)
+                # 执行 step (现在支持 y)
+                res = sim_game.step(move['x'], move['y'], move['rotation'], move['use_hold'])
                 
                 if res['game_over']:
                     break
@@ -74,101 +70,86 @@ class MCTS:
             # 3. Expansion & Evaluation
             leaf_value = 0
             if not res['game_over']:
-                 # Use Neural Net to evaluate leaf
                 leaf_value = self._expand_node(node, sim_game)
             else:
-                leaf_value = -1.0 # Penalty for dying
+                leaf_value = -1.0  # Penalty for dying
             
             # 4. Backup
-
-            final_val = leaf_value 
-            
+            final_val = leaf_value
             for n in reversed(path):
                 n.visit_count += 1
-                n.value_sum += final_val
-                # final_val = -final_val # 单人游戏不需要取反
-            # damage_reward = min(res.get('damage_sent', 0) / 4.0, 1.0)
-            # final_val = leaf_value + damage_reward
-            
-            # for n in reversed(path):
-            #     n.visit_count += 1
-            #     n.value_sum += final_val
-            #     # 这里暂时不翻转 value，假设单人最大化分数
-            #     # final_val = -final_val 
-
+                n.value_sum += final_val  # 单人游戏，不翻转
+        
         return root
+
     def _expand_node(self, node, game):
         if node.is_expanded:
             return 0
-            
+        
         board, ctx, p_type = game.get_state()
         
-        # 1. 获取所有合法动作的索引列表
+        # 获取合法动作
         legal_moves = game.get_legal_moves()
-        # print(f'{len(legal_moves)=}')
-        legal_indices = []
-        for move in legal_moves:
-            base_idx = move['x'] * 4 + move['rotation']
-            if move['use_hold']:
-                idx = 40 + base_idx
-            else:
-                idx = base_idx
-            if 0 <= idx < 80:
-                legal_indices.append(idx)
+        node.legal_moves = legal_moves  # 存储在节点
         
-        # To Tensor
+        num_legal = len(legal_moves)
+        if num_legal == 0:
+            node.is_expanded = True
+            return 0
+        
+        # 计算 logits 和 value
         t_board = torch.tensor(board, dtype=torch.float32, device=self.device).unsqueeze(0)
         t_ctx = torch.tensor(ctx, dtype=torch.float32, device=self.device).unsqueeze(0)
         t_ptype = torch.tensor([p_type], dtype=torch.long, device=self.device)
         
         with torch.no_grad():
             logits, value = self.model(t_board, t_ctx, t_ptype)
-            
-        logits = logits[0] # [80]
         
-        # --- [关键修改] Action Masking ---
-        # 创建一个全是负无穷的 mask
+        logits = logits[0]  # [80]
+        
+        # Masking: 只对合法 idx 取 logit
         mask = torch.full_like(logits, -float('inf'))
-        # 只在合法位置填入原来的 logit
-        if len(legal_indices) > 0:
-            mask[legal_indices] = logits[legal_indices]
-        else:
-            # 极罕见情况：无路可走（死局），但也得防 crash
-            pass
-            
-        # 对 mask 后的 logits 做 softmax
-        # 这样非法动作的概率直接变为 0，合法动作的概率和为 1
-        probs = torch.softmax(mask, dim=0).cpu().numpy() 
+        legal_indices = []
+        for move in legal_moves:
+            base_idx = move['x'] * 4 + move['rotation']
+            idx = base_idx + 40 if move['use_hold'] else base_idx
+            legal_indices.append(idx)
+            mask[idx] = logits[idx]
         
-        # --- 修改结束 ---
-
+        probs_t = torch.softmax(mask, dim=0).cpu().numpy()
+        
+        # 提取 probs 只为 legal_moves
+        probs = np.zeros(num_legal)
+        for i, idx in enumerate(legal_indices):
+            probs[i] = probs_t[idx]
+        
+        # 创建 children，用 0 to num_legal-1 作为 key
         node.children = {}
-        # 不需要 valid_probs_sum 了，因为 softmax 已经归一化了
+        for i in range(num_legal):
+            child = MCTSNode(parent=node, prior=probs[i])
+            node.children[i] = child
         
-        for idx in legal_indices:
-            p = probs[idx]
-            child = MCTSNode(parent=node, prior=p)
-            node.children[idx] = child
-                
         node.is_expanded = True
         return value.item()
+
     def get_action_probs(self, root, temp=1.0):
-        # Returns vector size 80
-        counts = np.zeros(80) # [修复] 大小改为 80
-        for idx, child in root.children.items():
-            counts[idx] = child.visit_count
-            
+        legal_count = len(root.legal_moves) if root.legal_moves else 0
+        counts = np.zeros(legal_count)
+        for i in range(legal_count):
+            if i in root.children:
+                counts[i] = root.children[i].visit_count
+        
         if temp == 0:
             best_idx = np.argmax(counts)
-            probs = np.zeros(80)
+            probs = np.zeros(legal_count)
             probs[best_idx] = 1.0
             return probs
-            
+        
         counts = counts ** (1.0 / temp)
         sum_counts = np.sum(counts)
         if sum_counts > 0:
             probs = counts / sum_counts
         else:
-            probs = np.zeros(80) # 防止除以0
-            
+            probs = np.zeros(legal_count)
+        
         return probs

@@ -36,10 +36,11 @@ Tetris* clone_tetris(const Tetris* tetris);
 void ai_reset_game(Tetris* tetris, int seed);
 void ai_get_state(const Tetris* tetris, int* board_buffer, int* queue_buffer, int* hold_buffer, int* meta_buffer);
 void ai_get_legal_moves(const Tetris* tetris, LegalMoves* out_moves);
-StepResult ai_step(Tetris* tetris, int x, int rotation, int use_hold);
+StepResult ai_step(Tetris* tetris, int x, int y, int rotation, int use_hold);
 void ai_receive_garbage(Tetris* tetris, int lines);
 // 【新增】可视化接口
 void ai_enable_visualization(Tetris* tetris);
 void ai_render(Tetris* tetris);
 void ai_close_visualization();
+void ai_receive_garbage(Tetris* tetris, int lines);
 #endif

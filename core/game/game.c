@@ -145,20 +145,6 @@ Bool board_piece_overlaps(const Board* board, const Piece* p) {
     return false;
 }
 
-static void place_piece(Board* board, const Piece* p) {
-    uint16_t mask = piece_get_mask(p);
-    for (int dy = 0; dy < 4; dy++) {
-        for (int dx = 0; dx < 4; dx++) {
-            if (mask & (1u << (15 - (dy * 4 + dx)))) {
-                int bx = p->x + dx;
-                int by = p->y - dy;
-                if (bx >= 0 && bx < board->width && by >= 0 && by < board->height) {
-                    board_set_cell(board, bx, by, 1);
-                }
-            }
-        }
-    }
-}
 
 int clear_rows(Board* board) {
     int cleared = 0;
