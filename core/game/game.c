@@ -412,29 +412,48 @@ void update_ren(Game* game) {
 }
 
 int clear_rows(Board* board) {
-    int num_rows_cleared = 0;
-    for (int y = board->height; y >= 0; y--) {
+    int src = 0; // 读取指针
+    int dst = 0; // 写入指针
+    int cleared_count = 0;
+
+    // 1. 扫描有效区域 (0 到 height-1)
+    // 这里的关键是：只处理合法的内存范围
+    while (src < board->height) {
         Bool is_row_full = TRUE;
         for (int x = 0; x < board->width; x++) {
-            if (board->state[x][y] == 0) {
+            if (board->state[x][src] == 0) {
                 is_row_full = FALSE;
                 break;
             }
         }
-        if (!is_row_full) continue;
 
-        num_rows_cleared++;
-        for (int yy = y; yy <= board->height - 1; yy++) {
-            for (int x = 0; x < board->width; x++) {
-                board->state[x][yy] = board->state[x][yy + 1];
+        if (is_row_full) {
+            // 这是一个满行，我们跳过它（不复制到 dst），相当于消除了
+            // 可以在这里加调试打印确认
+            // printf("[Fix] Clearing valid row at y=%d\n", src);
+            cleared_count++;
+            src++; // 只移动读取指针
+        } else {
+            // 这是一个非满行，保留它
+            if (src != dst) {
+                for (int x = 0; x < board->width; x++) {
+                    board->state[x][dst] = board->state[x][src];
+                }
             }
-        }
-        for (int x = 0; x < board->width; x++) {
-            board->state[x][board->height - 1] = 0;
+            src++;
+            dst++;
         }
     }
 
-    return num_rows_cleared;
+    // 2. 填充顶部空出的行
+    while (dst < board->height) {
+        for (int x = 0; x < board->width; x++) {
+            board->state[x][dst] = 0;
+        }
+        dst++;
+    }
+
+    return cleared_count;
 }
 
 Bool spawn_piece(Game* game) {
@@ -548,8 +567,8 @@ Bool is_current_piece_movable(Game* game) {
     for (int i = 0; i < 4; i++) {
         current_piece->x = original_x + directions[i][0];
         current_piece->y = original_y + directions[i][1];
-        printf("try move: %d, %d\n", current_piece->x, current_piece->y);
-        printf("is_overlapping: %d\n", is_overlapping(game->board, current_piece));
+        // printf("try move: %d, %d\n", current_piece->x, current_piece->y);
+        // printf("is_overlapping: %d\n", is_overlapping(game->board, current_piece));
         if (!is_overlapping(game->board, current_piece)) {
             current_piece->x = original_x;
             current_piece->y = original_y;
@@ -581,7 +600,7 @@ AttackType get_t_attack_type(Game* game, int num_rows_cleared) {
             && is_current_piece_movable(game)
         )
     ) return get_none_spin_attack_type(num_rows_cleared);
-    printf("game->state->is_last_rotate: %d\n");
+    // printf("game->state->is_last_rotate: %d\n");
     if (is_t_rect_has_hole(game) && game->state->is_last_rotate != 5) {
         // mini
         switch (num_rows_cleared) {

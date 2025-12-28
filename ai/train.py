@@ -1,4 +1,5 @@
 # ai/train.py
+
 import torch
 import torch.nn.functional as F
 import torch.optim as optim
@@ -8,18 +9,23 @@ import os
 import sys
 import pickle
 import shutil
+import time
 from collections import deque
 
 from .utils import TetrisGame
 from .model import TetrisNet
 from .mcts import MCTS
-from .reward import get_reward
+from .reward import get_reward, calculate_heuristics
 from . import config # 引入统一配置
 
 def normalize_score(score):
-    return np.tanh(score / 50.0)
+    # 使用 tanh 归一化，分母设为 100 适应目前的分数膨胀
+    return np.tanh(score / 100.0)
 
 def battle_simulation(net, mcts_sims, render=False):
+    """
+    单局模拟函数
+    """
     game = TetrisGame()
     if render:
         game.enable_render()
@@ -30,43 +36,75 @@ def battle_simulation(net, mcts_sims, render=False):
     steps = 0
     total_score = 0
     
+    # --- 统计变量 ---
+    total_lines = 0
+    tetris_count = 0
+    reward_sum_clear = 0.0
+    count_clear = 0
+    reward_sum_normal = 0.0
+    count_normal = 0
+    hole_sum = 0
+    
+    # --- 1. 获取初始指标 (用于 Delta 奖励) ---
+    board, ctx, p_type = game.get_state()
+    prev_metrics = calculate_heuristics(board)
+    
     while True:
         if render: game.render()
         
+        # MCTS 运行
         root = mcts.run(game)
         
-        # 观看模式下，温度系数可以设低一点，看它最好的表现
-        # 或者保持随机性以收集数据
-        temp = 0.5 
+        # 训练模式下保持一定的探索性
+        temp = 1.0 if steps < 30 else 0.5
         action_probs = mcts.get_action_probs(root, temp=temp)
         
-        board, ctx, p_type = game.get_state()
-        training_data.append([board, ctx, p_type, action_probs, None])
+        # 记录数据
+        # 注意：这里需要重新获取 state，或者直接用上面的 board, ctx, p_type
+        # 为了代码清晰，重新获取一次 current state 存入 buffer
+        s_board, s_ctx, s_ptype = game.get_state()
+        training_data.append([s_board, s_ctx, s_ptype, action_probs, None])
         
+        # 选择动作
         action_idx = np.random.choice(len(action_probs), p=action_probs)
-        
-        use_hold = 0
-        if action_idx >= 40:
-            use_hold = 1
-            action_idx -= 40
+        use_hold = 1 if action_idx >= 40 else 0
+        if use_hold: action_idx -= 40
             
+        # 执行步骤
         res = game.step(action_idx // 4, action_idx % 4, use_hold)
         if render: game.render()
         
-        # --- 关键修改 ---
-        # 传入 is_training=False，禁用“强制空洞结束”
-        # 这样即使 AI 玩崩了，也会继续挣扎，直到真正死亡
+        # --- 2. 获取新状态 & 计算指标 ---
         next_board, _, _ = game.get_state()
-        step_reward, force_over = get_reward(res, next_board, steps, is_training=False)
-
-        # 在 Eval 模式下，忽略 force_over 标记
-        # 只有真正的 game_over 才会结束
+        cur_metrics = calculate_heuristics(next_board)
         
+        # --- 3. 计算奖励 (传入 prev 和 cur) ---
+        # 单机训练也开启 force_over (is_training=True)
+        step_reward, force_over = get_reward(res, cur_metrics, prev_metrics, is_training=True)
+
+        if force_over:
+            res['game_over'] = True
+            
+        # --- 统计更新 ---
         total_score += step_reward
         steps += 1
+        hole_sum += cur_metrics['holes']
         
-        # 使用 EVAL 的最大步数 (50000)，解决提前结束问题
-        if res['game_over'] or steps > config.MAX_STEPS_EVAL:
+        if res['lines_cleared'] > 0:
+            total_lines += res['lines_cleared']
+            reward_sum_clear += step_reward
+            count_clear += 1
+            if res['lines_cleared'] == 4:
+                tetris_count += 1
+        else:
+            reward_sum_normal += step_reward
+            count_normal += 1
+            
+        # 更新上一帧指标
+        prev_metrics = cur_metrics
+        
+        # 这里的 max steps 可以用 config.MAX_STEPS_TRAIN
+        if res['game_over'] or steps > config.MAX_STEPS_TRAIN:
             break
             
     final_value = normalize_score(total_score)
@@ -75,12 +113,22 @@ def battle_simulation(net, mcts_sims, render=False):
         
     if render:
         game.close_render()
+    
+    # 计算本局统计摘要
+    stats = {
+        "score": total_score,
+        "steps": steps,
+        "lines": total_lines,
+        "tetrises": tetris_count,
+        "avg_holes": hole_sum / steps if steps > 0 else 0,
+        "max_height": cur_metrics['max_height'],
+        "avg_r_normal": reward_sum_normal / count_normal if count_normal > 0 else 0,
+        "avg_r_clear": reward_sum_clear / count_clear if count_clear > 0 else 0
+    }
         
-    return training_data, total_score
+    return training_data, stats
 
 def save_checkpoint(net, optimizer, memory, game_idx):
-    # 复用 mp_train 类似的保存逻辑，但单机版通常不需要备份，
-    # 或者如果这是专门用来微调的，也可以加上备份逻辑
     print(f"\n[Saving] Saving checkpoint to {config.CHECKPOINT_FILE}...")
     torch.save({
         'model_state_dict': net.state_dict(),
@@ -88,22 +136,11 @@ def save_checkpoint(net, optimizer, memory, game_idx):
         'game_idx': game_idx
     }, config.CHECKPOINT_FILE)
     
-    # 简单的覆盖保存 memory
     try:
         with open(config.MEMORY_FILE, 'wb') as f:
             pickle.dump(memory, f)
     except Exception as e:
          print(f"[Error] Failed to save memory: {e}")
-         
-    # 单机版训练较慢，每 100 局备份一次即可
-    if game_idx % 100 == 0:
-        backup_path = os.path.join(config.BACKUP_DIR, f"single_ckpt_{game_idx}.pth")
-        try:
-            shutil.copy(config.CHECKPOINT_FILE, backup_path)
-            print(f"[Backup] Saved to {backup_path}")
-        except: pass
-
-    print("[Saving] Done.")
 
 def load_checkpoint(net, optimizer):
     start_idx = 0
@@ -138,18 +175,29 @@ def train():
     game_idx, memory = load_checkpoint(net, optimizer)
     
     print(f"Starting Single Process Training on {config.DEVICE}...")
+    print("Tip: Use 'mp_train.py' for faster training.")
     
     try:
         while True:
-            # 默认开启渲染，因为单机版主要目的就是为了看
+            # 单机版通常为了调试或观看，默认开启渲染
+            # 如果你想跑得快一点，把这里改成 False
             do_render = True 
             
-            # 使用 config.MCTS_SIMS_EVAL (通常比训练时高，比如 50 或 100)
-            new_data, score = battle_simulation(net, mcts_sims=config.MCTS_SIMS_EVAL, render=do_render)
+            # 使用 config 中定义的模拟次数
+            # 如果是为了观看效果，建议用 MCTS_SIMS_EVAL (比如 50)
+            # 如果是为了单机训练，建议用 MCTS_SIMS_TRAIN (比如 30)
+            sims = config.MCTS_SIMS_TRAIN if not do_render else config.MCTS_SIMS_EVAL
+            
+            new_data, stats = battle_simulation(net, mcts_sims=sims, render=do_render)
             memory.extend(new_data)
             
             game_idx += 1
-            print(f"Game {game_idx}: Score = {score:.2f}, Steps = {len(new_data)}")
+            
+            # 打印像 mp_train 那样的详细日志
+            print(f"[Game {game_idx}] Score: {stats['score']:.2f} | Steps: {stats['steps']} | Lines: {stats['lines']}")
+            print(f"   Holes/Stp: {stats['avg_holes']:.2f} | MaxHt: {stats['max_height']}")
+            print(f"   Rwrd: Norm {stats['avg_r_normal']:.2f} vs Clear {stats['avg_r_clear']:.2f}")
+            print("-" * 40)
             
             if len(memory) < config.BATCH_SIZE:
                 continue

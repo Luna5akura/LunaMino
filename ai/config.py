@@ -9,7 +9,7 @@ MEMORY_SIZE = 20000        # 经验池大小
 gamma = 0.99               # 折扣因子 (如未来引入)
 
 # --- MCTS 配置 ---
-MCTS_SIMS_TRAIN = 30       # 训练时的搜索次数 (追求速度)
+MCTS_SIMS_TRAIN = 80       # 训练时的搜索次数 (追求速度)
 MCTS_SIMS_EVAL = 50        # 观看/评估时的搜索次数 (追求质量)
 NUM_WORKERS = 10           # mp_train 的进程数 (建议 CPU核心数 - 2)
 

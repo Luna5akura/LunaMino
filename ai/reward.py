@@ -1,120 +1,127 @@
 # ai/reward.py
+
 import numpy as np
 
 def calculate_heuristics(board_state):
     """
     计算启发式特征
-    假设 board_state 是 (20, 10) 的 0/1 矩阵
-    根据 C 代码逻辑：y=0 是底部，y=19 是顶部
+    board_state: (20, 10) 0/1 矩阵, 0是顶, 19是底
     """
-    # 确保是 int 类型
     board = (board_state > 0).astype(int)
     
-    heights = []
-    holes = 0
+    # 获取每一列的最高点高度
+    # argmax 如果全是0会返回0，所以需要特殊处理
+    # 我们构造一个辅助判断：如果一列全是0，top_y 应该是 20 (height=0)
+    # 这里用一种向量化写法加速
+    mask = board != 0
+    # 找到每列第一个非零元素的索引
+    # argmax 在 bool 数组上会返回第一个 True 的索引
+    first_non_zero = np.argmax(mask, axis=0)
     
-    # 1. 计算每一列的高度 和 空洞
-    for x in range(10):
-        # 这一列的数据
-        col = board[:, x]
-        
-        # 找高度: 从顶部(19)向下找第一个1
-        h = 0
-        for y in range(19, -1, -1):
-            if col[y] == 1:
-                h = y + 1
-                break
-        heights.append(h)
-        
-        # 找空洞: 在当前高度以下，如果有0，就是空洞
-        # 比如高度是5，那么索引 0~4 应该是实心的。如果 board[y][x] == 0 且 y < h-1，则是空洞
-        if h > 0:
-            # 取出地面到最高点之间的部分
-            col_valid = col[:h]
-            # 统计里面的 0 的个数
-            n_zeros = np.sum(col_valid == 0)
-            holes += n_zeros
-
-    heights = np.array(heights)
+    # 检查该列是否真的有方块（全0列 argmax 也是0）
+    has_blocks = mask[first_non_zero, np.arange(10)]
+    
+    # y=0是顶，y=19是底。高度 = 20 - y
+    heights = np.where(has_blocks, 20 - first_non_zero, 0)
+    
     max_height = np.max(heights)
-    aggregate_height = np.sum(heights)
+    agg_height = np.sum(heights)
     
-    # 2. 不平整度 (相邻列高度差)
+    # 计算空洞
+    # 定义：任何在“方块下方”的空白格都是空洞
+    # 我们可以通过累积和来掩盖掉“表面”
+    # 这是一个比较快速的技巧：
+    # 对每一列，从顶到底，一旦遇到1，后续所有的0都是空洞
+    
+    holes = 0
+    for x in range(10):
+        if heights[x] == 0:
+            continue
+        # 取出这一列
+        col = board[:, x]
+        # 找到最高点位置
+        top = 20 - heights[x]
+        # 统计 top 下方 0 的数量
+        holes += np.sum(col[top:] == 0)
+
+    # 不平整度 (相邻列高度差绝对值之和)
     bumpiness = np.sum(np.abs(heights[:-1] - heights[1:]))
     
     return {
         'max_height': max_height,
         'holes': holes,
         'bumpiness': bumpiness,
-        'agg_height': aggregate_height
+        'agg_height': agg_height,
+        'heights': heights # 供调试用
     }
-
-def get_reward(step_result, board_state, current_steps, is_training=True):
-    """
-    统一的奖励函数
-    
-    :param step_result: game.step() 返回的字典
-    :param board_state: game.get_state() 返回的 board (20, 10)
-    :param current_steps: 当前局已走的步数
-    :param is_training: 如果为 True，会启用启发式强制结束(force_over)以加速训练
-                        如果为 False，则只计算分数，不强制结束游戏
-                        默认值为 True，保持向后兼容
-    :return: (reward, should_force_game_over)
-    """
-    # 处理向后兼容：如果只传三个参数，则默认为训练模式
-    if len(locals()) <= 3:  # step_result, board_state, current_steps
-        is_training = True
-    
-    metrics = calculate_heuristics(board_state)
-    
+def get_reward(step_result, current_metrics, prev_metrics, is_training=True):
     reward = 0.0
     force_game_over = False
-
-    # --- 1. 基础生存与消除奖励 ---
-    if step_result['lines_cleared'] > 0:
-        # 消除行是最高优先级
-        reward += step_result['lines_cleared'] * 1.0
-        # 鼓励多消 (Tetris)
-        if step_result['lines_cleared'] >= 4:
-            reward += 2.0
-    else:
-        # 没消行时，给极小的生存分
-        reward += 0.01
-
-    # --- 2. 攻击奖励 (可选) ---
-    if step_result['damage_sent'] > 0:
-        reward += step_result['damage_sent'] * 0.5
-
-    # --- 3. 启发式惩罚 ---
-    # 惩罚空洞：空洞是万恶之源
-    reward -= metrics['holes'] * 0.15
     
-    # 惩罚不平整：鼓励地形平整
-    reward -= metrics['bumpiness'] * 0.02
-    
-    # 惩罚过高：防止突然死亡
-    if metrics['max_height'] > 12:
-        reward -= (metrics['max_height'] - 12) * 0.1
-    if metrics['max_height'] > 17:
-        reward -= 1.0 # 极度危险
+    # ==========================================================
+    # 1. 生存奖励 (Living Wage)
+    # ==========================================================
+    # 提高一点生存奖励，确保即使走了一步烂棋，只要没死，总分尽量非负
+    reward += 2.0 
 
-    # --- 4. 游戏结束判定 ---
+    # ==========================================================
+    # 2. 消除奖励 (Incentive)
+    # ==========================================================
+    lines = step_result['lines_cleared']
+    if lines > 0:
+        print(f'\n {lines=} \n')
+        # 即使只消1行，也给它巨大的甜头，引导它去消行
+        if lines == 1: reward += 20.0  # 原来是10
+        elif lines == 2: reward += 50.0
+        elif lines == 3: reward += 100.0
+        elif lines == 4: reward += 200.0 # Tetris 是终极目标
+        
+        if step_result.get('combo', 0) > 0:
+            reward += step_result['combo'] * 10.0
+
+    # ==========================================================
+    # 3. 惩罚 (Penalties) - 更加温和
+    # ==========================================================
+    
+    # A. 静态空洞惩罚 (Static Holes)
+    # 只要有空洞就扣分，但扣得很少，作为长期压力
+    reward -= current_metrics['holes'] * 0.1 
+
+    # B. 动态空洞惩罚 (Delta Holes) - 关键修改点
+    # 原来是 * 5.0，太重了。现在改为 * 2.0
+    # 并且，如果这一步既消行了又产生了空洞，稍微宽容一点
+    cur_holes = current_metrics['holes']
+    prev_holes = prev_metrics['holes'] if prev_metrics else 0
+    hole_change = cur_holes - prev_holes
+    
+    if hole_change > 0:
+        # 制造了新空洞
+        penalty = hole_change * 2.0 
+        reward -= penalty
+    elif hole_change < 0:
+        # 填补了空洞，给奖励！这是让它学会修补的关键
+        print('fill hole')
+        reward += abs(hole_change) * 5.0  # 填坑奖励要比挖坑惩罚大
+
+    # C. 高度惩罚
+    # 鼓励在这个阶段把方块放低
+    # 增加一个“落点高度”的微小惩罚，让它倾向于放在低处
+    # (注意：utils.py 里需要确保 landing_height 正确，如果暂不可用，用 max_height 代替)
+    mh = current_metrics['max_height']
+    if mh > 10: reward -= 0.5
+    if mh > 16: reward -= 3.0 # 危险区重罚
+
+    # ==========================================================
+    # 4. 游戏结束
+    # ==========================================================
     if step_result['game_over']:
-        reward -= 2.0 # 死亡重罚
-    
-    # --- 5. 强制结束逻辑 ---
+        reward -= 50.0 
+
+    # 5. 训练强制结束 (烂局重开)
     if is_training:
-        # 训练时：如果玩得太烂（空洞太多），直接重开，不要浪费时间
-        if metrics['holes'] > 15:
+        # 稍微放宽一点限制，别让它刚开始学就一直重开
+        if cur_holes > 20 or mh > 19:
             force_game_over = True
-            reward -= 1.0
-    else:
-        # 评估/观看时：即使玩得烂，也让它挣扎到死，不人为干预
-        pass
+            reward -= 20.0
 
     return reward, force_game_over
-
-# 兼容旧代码的包装函数
-def get_reward_compat(step_result, board_state, current_steps):
-    """向后兼容的包装函数，用于旧代码调用"""
-    return get_reward(step_result, board_state, current_steps, is_training=True)

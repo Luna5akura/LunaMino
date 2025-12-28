@@ -36,6 +36,13 @@ class MCTS:
         
         # 1. Expand root immediately
         self._expand_node(root, game_state)
+
+        legal_count = len(root.children)
+        if legal_count > 0:
+            noise = np.random.dirichlet([0.3] * legal_count)
+            epsilon = 0.25 # 25% 的决策由噪声决定
+            for i, (idx, child) in enumerate(root.children.items()):
+                child.prior = (1 - epsilon) * child.prior + epsilon * noise[i]
         
         for _ in range(self.num_simulations):
             node = root
@@ -73,22 +80,41 @@ class MCTS:
                 leaf_value = -1.0 # Penalty for dying
             
             # 4. Backup
-            damage_reward = min(res.get('damage_sent', 0) / 4.0, 1.0)
-            final_val = leaf_value + damage_reward
+
+            final_val = leaf_value 
             
             for n in reversed(path):
                 n.visit_count += 1
                 n.value_sum += final_val
-                # 这里暂时不翻转 value，假设单人最大化分数
-                # final_val = -final_val 
+                # final_val = -final_val # 单人游戏不需要取反
+            # damage_reward = min(res.get('damage_sent', 0) / 4.0, 1.0)
+            # final_val = leaf_value + damage_reward
+            
+            # for n in reversed(path):
+            #     n.visit_count += 1
+            #     n.value_sum += final_val
+            #     # 这里暂时不翻转 value，假设单人最大化分数
+            #     # final_val = -final_val 
 
         return root
-
     def _expand_node(self, node, game):
         if node.is_expanded:
             return 0
             
         board, ctx, p_type = game.get_state()
+        
+        # 1. 获取所有合法动作的索引列表
+        legal_moves = game.get_legal_moves()
+        # print(f'{len(legal_moves)=}')
+        legal_indices = []
+        for move in legal_moves:
+            base_idx = move['x'] * 4 + move['rotation']
+            if move['use_hold']:
+                idx = 40 + base_idx
+            else:
+                idx = base_idx
+            if 0 <= idx < 80:
+                legal_indices.append(idx)
         
         # To Tensor
         t_board = torch.tensor(board, dtype=torch.float32, device=self.device).unsqueeze(0)
@@ -98,36 +124,34 @@ class MCTS:
         with torch.no_grad():
             logits, value = self.model(t_board, t_ctx, t_ptype)
             
-        probs = torch.softmax(logits, dim=1).cpu().numpy()[0] # [80]
+        logits = logits[0] # [80]
         
-        # Get Legal Moves from C
-        legal_moves = game.get_legal_moves() 
+        # --- [关键修改] Action Masking ---
+        # 创建一个全是负无穷的 mask
+        mask = torch.full_like(logits, -float('inf'))
+        # 只在合法位置填入原来的 logit
+        if len(legal_indices) > 0:
+            mask[legal_indices] = logits[legal_indices]
+        else:
+            # 极罕见情况：无路可走（死局），但也得防 crash
+            pass
+            
+        # 对 mask 后的 logits 做 softmax
+        # 这样非法动作的概率直接变为 0，合法动作的概率和为 1
+        probs = torch.softmax(mask, dim=0).cpu().numpy() 
         
+        # --- 修改结束 ---
+
         node.children = {}
-        valid_probs_sum = 0
+        # 不需要 valid_probs_sum 了，因为 softmax 已经归一化了
         
-        for move in legal_moves:
-            # --- [修复] 编码动作索引 (LegalMoves -> 0-79) ---
-            base_idx = move['x'] * 4 + move['rotation']
-            if move['use_hold']:
-                idx = 40 + base_idx
-            else:
-                idx = base_idx
-                
-            if 0 <= idx < 80:
-                p = probs[idx]
-                child = MCTSNode(parent=node, prior=p)
-                node.children[idx] = child
-                valid_probs_sum += p
-                
-        # Re-normalize priors
-        if valid_probs_sum > 0:
-            for child in node.children.values():
-                child.prior /= valid_probs_sum
+        for idx in legal_indices:
+            p = probs[idx]
+            child = MCTSNode(parent=node, prior=p)
+            node.children[idx] = child
                 
         node.is_expanded = True
         return value.item()
-
     def get_action_probs(self, root, temp=1.0):
         # Returns vector size 80
         counts = np.zeros(80) # [修复] 大小改为 80

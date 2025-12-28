@@ -675,43 +675,60 @@ StepResult ai_step(Tetris* tetris, int x, int rotation, int use_hold) {
         return result;
     }
 
+    // 1. 处理 Hold
     if (use_hold) try_hold_piece(game);
 
     Piece* p = game->current_piece;
+    
+    // 2. 强制设置旋转
     Piece* temp = init_piece(p->type);
     memcpy(p->shape, temp->shape, sizeof(p->shape));
     free_piece(temp);
     p->rotation = (Rotation)0;
-    
     while ((int)p->rotation != rotation) rotate_piece(p, ROTATE_CW);
     
+    // 3. 设置 X 坐标
     p->x = x;
-    p->y = 21;
     
-    if (is_overlapping(game->board, p)) {
-        result.is_game_over = TRUE;
-        tetris->state->is_game_over = TRUE;
-        return result; 
+    // 4. 智能瞬移 (寻找最低落点)
+    int best_y = -999;
+    for (int y = -4; y < 40; y++) {
+        p->y = y;
+        if (!is_overlapping(game->board, p)) {
+            p->y = y - 1;
+            Bool is_ground = is_overlapping(game->board, p);
+            p->y = y;
+            
+            if (is_ground) {
+                best_y = y;
+                break;
+            }
+        }
+    }
+    
+    if (best_y != -999) {
+        p->y = best_y;
+    } else {
+        p->y = 20; 
     }
 
-    int loop_guard = 0;
-    while (!is_overlapping(game->board, p) && loop_guard < 40) {
-        p->y--;
-        loop_guard++;
+    // 5. T-Spin 标记 Hack
+    if (p->type == T_PIECE) {
+        game->state->is_last_rotate = 1; 
+    } else {
+        game->state->is_last_rotate = 0;
     }
-    p->y++; 
     
-    if (p->type == T_PIECE) game->state->is_last_rotate = 1;
-    else game->state->is_last_rotate = 0;
-    
+    // 6. 计算攻击信息 (必须在 next_piece 之前做，因为依靠 current_piece)
     tetris->state->attack_type = get_attack_type(game);
     tetris->state->is_pc = is_perfect_clear(game);
     update_ren(game);
-    int atk = get_atk(tetris);
+    int atk = get_atk(tetris); // 计算本次攻击力
     
     result.attack_type = tetris->state->attack_type;
-    result.damage_sent = 0;
+    result.combo_count = game->state->ren; // 记录当前的连击数
     
+    // B2B 状态更新 (仅更新状态，不决定是否发送垃圾，因为还要看是否消行)
     if (result.attack_type != ATK_NONE && result.attack_type != ATK_SINGLE && 
         result.attack_type != ATK_DOUBLE && result.attack_type != ATK_TRIPLE) {
         tetris->state->b2b_count++;
@@ -723,10 +740,24 @@ StepResult ai_step(Tetris* tetris, int x, int rotation, int use_hold) {
         result.b2b_count = tetris->state->b2b_count;
     }
     
+    // =================================================================
+    // 【关键修改】 顺序调整
+    // 1. 先调用 next_piece 将当前方块锁定(Lock)到棋盘上
+    // 2. 再调用 clear_rows 检查是否有满行
+    // =================================================================
+    
+    // 锁定并生成下一个 (Lock & Spawn)
+    result.is_game_over = (int)next_piece(game); 
+
+    // 此时棋盘 board->state 已经更新，可以正确检测消行了
     result.lines_cleared = clear_rows(game->board);
     
+    // 7. 垃圾行结算 (基于正确的 lines_cleared)
+    result.damage_sent = 0;
     if (result.lines_cleared > 0) {
+        // 这一步消行了
         if (tetris->state->pending_attack > 0) {
+            // 抵消垃圾
             if (atk >= tetris->state->pending_attack) {
                 result.damage_sent = atk - tetris->state->pending_attack;
                 tetris->state->pending_attack = 0;
@@ -735,22 +766,23 @@ StepResult ai_step(Tetris* tetris, int x, int rotation, int use_hold) {
                 result.damage_sent = 0;
             }
         } else {
+            // 发送攻击
             result.damage_sent = atk;
         }
     } else {
+        // 没有消行，接收垃圾
         if (tetris->state->pending_attack > 0) {
             int trash = tetris->state->pending_attack;
-            if (trash > 8) trash = 8;
+            if (trash > 8) trash = 8; // 每次最多接8行 (根据你的规则)
             tetris->state->pending_attack -= trash;
             receive_garbage_line(tetris, trash);
         }
     }
-
-    result.is_game_over = (int)next_piece(game); 
-    result.combo_count = game->state->ren;
     
     return result;
 }
+
+
 
 void ai_receive_garbage(Tetris* tetris, int lines) {
     receive_attack(tetris, lines);

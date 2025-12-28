@@ -114,6 +114,8 @@ class TetrisGame:
         # Channel 2: Ghost Piece (Optional, skipped for now)
         
         board = np.array(board_buf).reshape(20, 10) # y, x
+
+        board = np.flip(board, axis=0).copy()
         
         # 翻转 y 轴，让底部在下面 (如果在 C 中 y=0 是底部)
         # 通常神经网络喜欢 y=0 在左上角或符合直觉，这里保持 C 的原始数据
