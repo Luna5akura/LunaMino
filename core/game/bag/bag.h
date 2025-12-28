@@ -4,15 +4,17 @@
 #define BAG_H
 
 #include "../../piece/piece.h"
+#include "../../../util/util.h"
 
 typedef struct {
-    int current;
     PieceType sequence[7];
+    int head;
 } Bag;
 
-Bag* init_bag();
-void free_bag(Bag* bag);
-Bag* copy_bag(Bag* bag);
-PieceType bag_next_piece(Bag* bag);
+void bag_init(Bag* bag);
+PieceType bag_next(Bag* bag);
+static inline void bag_copy(Bag* dest, const Bag* src) {
+    *dest = *src;
+}
 
 #endif

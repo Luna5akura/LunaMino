@@ -1,49 +1,42 @@
 // core/game/previews/previews.c
 
 #include "previews.h"
-#include <stdlib.h>
 #include <string.h>
-#include <stdio.h> // for printf
 
-Previews*  init_previews(int length) {
-    if (length <= 0) length = 5; // 默认值保护
+void previews_init(Previews* p, int length) {
+    if (length > MAX_PREVIEW_CAPACITY) length = MAX_PREVIEW_CAPACITY;
+    if (length < 1) length = 1;
 
-    size_t total_size = sizeof(Previews) + length * sizeof(PieceType);
-    Previews* previews = malloc(total_size);
-    if (!previews) exit(1);
-
-    // 显式清零
-    memset(previews, 0, total_size);
-
-    previews->current = 0;
-    previews->length = length;
-    return previews;
+    memset(p->pieces, 0, sizeof(p->pieces));
+    
+    p->head = 0;
+    p->capacity = length;
+    p->count = 0; 
 }
 
-void free_previews(Previews* previews) {
-    if (previews) free(previews);
+PieceType previews_next(Previews* p, PieceType input) {
+    // 这里的逻辑是一个环形队列
+    // 1. 取出 head 指向的元素 (旧的队首)
+    PieceType result = p->pieces[p->head];
+    
+    // 2. 将新元素覆盖到当前 head 位置
+    // 为什么是覆盖？
+    // 因为在固定长度的滑动窗口中，队首出去后，那个位置正好变成了逻辑上的队尾的下一个位置
+    // 举例：[A, B, C], head=0. 
+    // 取出 A. 此时逻辑变成 [B, C, ?]. 
+    // 实际上我们在 0 的位置写入 D. 数组变成 [D, B, C]. head 移到 1 (指向 B).
+    // 逻辑序列: B, C, D. 正确。
+    p->pieces[p->head] = input;
+    
+    // 3. 移动指针
+    p->head = (p->head + 1) % p->capacity;
+    
+    return result;
 }
 
-Previews* copy_previews(Previews* previews) {
-    if (!previews) return NULL;
-    size_t total_size = sizeof(Previews) + previews->length * sizeof(PieceType);
-    Previews* new_previews = malloc(total_size);
-    if (!new_previews) exit(1);
-
-    memcpy(new_previews, previews, total_size);
-    return new_previews;
-}
-
-PieceType next_preview(Previews* previews, PieceType input) {
-    if (!previews) return (PieceType)0;
-
-    // 安全检查索引
-    if (previews->current < 0 || previews->current >= previews->length) {
-        previews->current = 0; // 强制修复
-    }
-
-    PieceType rtn = previews->previews[previews->current];
-    previews->previews[previews->current] = input;
-    previews->current = (previews->current + 1) % previews->length;
-    return rtn;
+PieceType previews_peek(const Previews* p, int index) {
+    if (index >= p->capacity) return (PieceType)0;
+    
+    int actual_index = (p->head + index) % p->capacity;
+    return p->pieces[actual_index];
 }

@@ -1,21 +1,19 @@
 // core/game/game.c
-
 #include "game.h"
 #include <stdlib.h>
 #include <string.h>
-#include <stdio.h>
+#include <stdio.h> // 如果需要调试，保留，否则可移除
+#include <time.h> // for potential time seed
 
-#define GAME_SPAWN_X 3
-#define GAME_SPAWN_Y 21
 #define GAME_VISIBLE_HEIGHT 20
+#define DEFAULT_PREVIEW_COUNT 5
+#define DEFAULT_IS_HOLD_ENABLED true
+#define DEFAULT_SEED 0
 
-#define GAME_PREVIEW_COUNT 5
-#define GAME_IS_HOLD_ENABLED TRUE
-#define GAME_SEED 0
-
-const int NORMAL_PIECE_NORMAL_SRS[4][2][5][2] = {
+// SRS 踢墙表 (优化：const 数组)
+static const int NORMAL_PIECE_NORMAL_SRS[4][2][5][2] = {
     { // UP
-        { {0, 0}, {-1, 0}, {-1 ,1}, {0, -2}, {-1, -2} }, // CW
+        { {0, 0}, {-1, 0}, {-1, 1}, {0, -2}, {-1, -2} }, // CW
         { {0, 0}, {1, 0}, {1, 1}, {0, -2}, {1, -2} }, // CCW
     },
     { // RIGHT
@@ -31,8 +29,7 @@ const int NORMAL_PIECE_NORMAL_SRS[4][2][5][2] = {
         { {0, 0}, {-1, 0}, {-1, -1}, {0, 2}, {-1, 2} }, // CCW
     }
 };
-
-const int I_PIECE_NORMAL_SRS[4][2][5][2] = {
+static const int I_PIECE_NORMAL_SRS[4][2][5][2] = {
     { // UP
         { {0, 0}, {-2, 0}, {1, 0}, {-2, -1}, {1, 2} }, // CW
         { {0, 0}, {-1, 0}, {2, 0}, {-1, 2}, {2, -1} }, // CCW
@@ -50,748 +47,409 @@ const int I_PIECE_NORMAL_SRS[4][2][5][2] = {
         { {0, 0}, {-2, 0}, {1, 0}, {-2, -1}, {1, 2} }, // CCW
     }
 };
-
-const int NORMAL_PIECE_180_SRS[4][6][2] = {
+static const int NORMAL_PIECE_180_SRS[4][6][2] = {
     { {0, 0}, {0, 1}, {1, 1}, {-1, 1}, {1, 0}, {-1, 0} }, // UP
     { {0, 0}, {1, 0}, {1, 2}, {1, 1}, {0, 2}, {0, 1} }, // RIGHT
     { {0, 0}, {0, -1}, {-1, -1}, {1, -1}, {-1, 0}, {1, 0} }, // DOWN
     { {0, 0}, {-1, 0}, {-1, 2}, {-1, 1}, {0, 2}, {0, 1} }, // LEFT
 };
-
-const int I_PIECE_180_SRS[4][2][2] = {
+static const int I_PIECE_180_SRS[4][2][2] = {
     { {0, 0}, {0, -1} }, // UP
     { {0, 0}, {1, 0} }, // RIGHT
     { {0, 0}, {0, 1} }, // DOWN
     { {0, 0}, {-1, 0} }, // LEFT
 };
 
-const int T_CORNERS[4][2] = {
+// T helpers
+static const int T_CORNERS[4][2] = {
     {0, 0}, {0, 2}, {2, 0}, {2, 2}
 };
-
-
-const int T_RECTS[4][2][2] = {
+static const int T_RECTS[4][2][2] = {
     { {0, 0}, {0, 2} },
     { {0, 2}, {2, 2} },
     { {2, 0}, {2, 2} },
     { {0, 0}, {2, 0} }
 };
 
-GameConfig* init_game_config() {
-    GameConfig* config = malloc(sizeof(GameConfig));
-    
-    config->preview_count = GAME_PREVIEW_COUNT;
-    config->is_hold_enabled = GAME_IS_HOLD_ENABLED;
-    config->seed = GAME_SEED;
-    srandom(config->seed);
 
-    return config;
-}
+Game* game_init(const GameConfig* config) {
+    Game* game = (Game*)malloc(sizeof(Game));
+    if (game == NULL) return NULL;
+    memset(game, 0, sizeof(Game));
 
-void free_game_config(GameConfig* config) {
-    free(config);
-}
+    // Config defaults
+    game->config.preview_count = config ? config->preview_count : DEFAULT_PREVIEW_COUNT;
+    if (game->config.preview_count > MAX_PREVIEW_CAPACITY) game->config.preview_count = MAX_PREVIEW_CAPACITY;
+    game->config.is_hold_enabled = config ? config->is_hold_enabled : DEFAULT_IS_HOLD_ENABLED;
+    game->config.seed = config ? config->seed : DEFAULT_SEED;
 
-GameConfig* copy_game_config(GameConfig* config) {
-    GameConfig* new_config = malloc(sizeof(GameConfig));
-    memcpy(new_config, config, sizeof(GameConfig));
-    return new_config;
-}
+    // Random seed
+    magic_srandom(game->config.seed);
 
-GameState* init_game_state(GameConfig* config) {
-    GameState* state = malloc(sizeof(GameState));
-    
-    state->bag = init_bag();
+    // Init state
+    bag_init(&game->state.bag);
+    previews_init(&game->state.previews, game->config.preview_count);
 
-    Previews* previews = init_previews(config->preview_count);
-    previews->previews[0] = state->bag->sequence[0];
-    for (int i = 1; i < config->preview_count; i++) {
-        previews->previews[i] = bag_next_piece(state->bag);
+    // Fill previews
+    for (int i = 0; i < game->state.previews.capacity; i++) {
+        (void)previews_next(&game->state.previews, bag_next(&game->state.bag));
     }
-    state->previews = previews;
-    state->hold_piece = NULL;
-    state->can_hold_piece = TRUE;
-    state->is_last_rotate = 0;
-    state->is_last_clear_line = FALSE;
-    state->ren = -1;
 
-    return state;
-}
+    // Init board (no malloc, direct init)
+    memset(&game->board, 0, sizeof(Board));
+    game->board.width = BOARD_WIDTH;
+    game->board.height = BOARD_HEIGHT;
 
-void free_game_state(GameState* state) {
-    free_bag(state->bag);
-    free_previews(state->previews);
-    if (state->hold_piece) free_piece(state->hold_piece);
-    free(state);
-}
+    // Current piece
+    PieceType type = previews_next(&game->state.previews, bag_next(&game->state.bag));
+    piece_init(&game->current_piece, type);
+    piece_get_spawn_pos(type, &game->current_piece.x, &game->current_piece.y);
 
-GameState* copy_game_state(GameState* state) {
-    GameState* new_state = malloc(sizeof(GameState));
-    memcpy(new_state, state, sizeof(GameState));
-    new_state->bag = copy_bag(state->bag);
-    new_state->previews = copy_previews(state->previews);
-    if (state->hold_piece) new_state->hold_piece = copy_piece(state->hold_piece);
-    return new_state;
-}
+    // Hold and state
+    game->state.has_hold_piece = false;
+    game->state.can_hold_piece = true;
+    game->state.is_last_rotate = 0;
+    game->state.is_last_clear_line = false;
+    game->state.ren = -1;
 
-Game* init_game() {
-    Game* game = malloc(sizeof(Game));
-
-    GameConfig* config = init_game_config();
-    game->config = config;
-
-    GameState* state = init_game_state(config);
-    game->state = state;
-
-    Board* board = init_board();
-    game->board = board;
-
-    Piece* current_piece = init_piece(bag_next_piece(state->bag));
-    current_piece->x = 3;
-    current_piece->y = 21;
-    current_piece->rotation = (Rotation)0;
-    game->current_piece = current_piece;
+    game->is_game_over = false;
 
     return game;
 }
 
-void free_game(Game* game) {
-    if (game == NULL) return;
-    // printf("Freeing game config...\n");
-    if (game->config) free_game_config(game->config);
-    
-    // printf("Freeing game state...\n");
-    if (game->state) free_game_state(game->state);
-    
-    // printf("Freeing board...\n");
-    if (game->board) free_board(game->board);
-    
-    // printf("Freeing current piece...\n");
-    if (game->current_piece) free_piece(game->current_piece);
-    
-    // printf("Freeing game struct...\n");
+void game_free(Game* game) {
     free(game);
 }
 
-Game* copy_game(Game* game) {
-    Game* new_game = malloc(sizeof(Game));
-    memcpy(new_game, game, sizeof(Game));
-    new_game->config = copy_game_config(game->config);
-    new_game->state = copy_game_state(game->state);
-    new_game->board = copy_board(game->board);
-    if (game->current_piece) new_game->current_piece = copy_piece(game->current_piece);
-    return new_game;
+Game* game_copy(const Game* src) {
+    if (!src) return NULL;
+    Game* dest = (Game*)malloc(sizeof(Game));
+    if (dest == NULL) return NULL;
+    memcpy(dest, src, sizeof(Game));
+    return dest;
 }
 
-Bool is_overlapping(Board* board, Piece* piece) {
-    for (int i = 0; i < 4; i++) {
-        for (int j = 0; j < 4; j++) {
-            if (piece->shape[i][j] == 0) continue;
-
-            int x = piece->x + j;
-            int y = piece->y - i;
-
-            if (x < 0 || x >= board->width || y < 0) return TRUE; 
-            
-            // 【新增修复】防止向上越界读取
-            // 如果 y 超过了棋盘高度（比如在缓冲区上方），我们视为没有碰撞（空）
-            // 或者根据你的实现，如果 y >= board->height，视为出界？
-            // 通常 Tetris 允许方块在 board 上方存在（Buffer Zone）。
-            // 既然我们要防崩溃，必须检查数组边界：
-            if (y >= board->height) {
-                // 如果你的 board->state 只有 20 高，访问 [x][21] 会崩溃。
-                // 这里我们假设上方是空气 (0)，直接 continue 不去读数组
-                continue; 
-            }
-
-            if (board->state[x][y] != 0) return TRUE;
-        }
-    }
-    return FALSE;
-}
-
-Bool is_top_out(Board* board, Piece* piece) {
-    for (int i = 0; i < 4; i++) {
-        for (int j = 0; j < 4; j++) {
-            if (piece->shape[i][j] == 0) continue;
-            
-            int y = piece->y - i;
-            if (y < GAME_VISIBLE_HEIGHT) return FALSE;
-        }
-    }
-    return TRUE;
-} 
-
-Bool hard_drop(Piece* piece, Board* board) {
-    // return: is_successful
-    piece->y--;
-    if (is_overlapping(board, piece)) {
-        piece->y++;
-        return FALSE;
-    }
-    while (!is_overlapping(board, piece)) {
-        piece->y--;
-    }
-    piece->y++;
-    return TRUE;
-}
-
-Bool try_move_piece(Game* game, MoveAction action) {
-    // return: is_successful
-    Piece* current_piece = game->current_piece;
-    Board* board = game->board;
-
-
-    // hard drop
-    if (action == MOVE_HARD_DROP) {
-        Bool rtn = hard_drop(current_piece, board);
-        if (rtn) game->state->is_last_rotate = 0;
-        printf("hard drop: %d\n", rtn);
-        return rtn;
-    }
-
-    // not hard drop
-    int original_x = current_piece->x;
-    int original_y = current_piece->y;
-    move_piece(current_piece, action);
-
-    if (!is_overlapping(board, current_piece)) {
-        game->state->is_last_rotate = 0;
-        return TRUE;
-    }
-    
-    current_piece->x = original_x;
-    current_piece->y = original_y;
-    return FALSE;
-}  
-
-
-Bool try_displace_piece(Game* game, const int direction[2]) {
-    // return: is_successful
-    Piece* current_piece = game->current_piece;
-    Board* board = game->board;
-    int original_x = current_piece->x;
-    int original_y = current_piece->y;
-    displace_piece(current_piece, direction);
-
-    if (!is_overlapping(board, current_piece)) return TRUE;
-    
-    current_piece->x = original_x;
-    current_piece->y = original_y;
-    return FALSE;
-}
-
-Bool try_rotate_piece_normal(Game* game, RotationAction action) {
-    // return: is_successful
-    Piece* current_piece = game->current_piece;
-    Rotation original_rotation = current_piece->rotation;
-    int original_shape[4][4];
-    memcpy(original_shape, current_piece->shape, sizeof(current_piece->shape));
-    rotate_piece(current_piece, action);
-
-    for (int i = 0; i < 5; i++) {
-        Bool is_successful = current_piece->type == I_PIECE
-            ? try_displace_piece(game, I_PIECE_NORMAL_SRS[(int)original_rotation][(int)action][i])
-            : try_displace_piece(game, NORMAL_PIECE_NORMAL_SRS[(int)original_rotation][(int)action][i]);
-
-        if (is_successful) {
-            game->state->is_last_rotate = i + 1;
-            return TRUE;
-        }
-    }
-    current_piece->rotation = original_rotation;
-    memcpy(current_piece->shape, original_shape, sizeof(current_piece->shape));
-    return FALSE;
-}
-
-Bool try_rotate_piece_180(Game* game, RotationAction action) {
-    // return: is_successful
-    Piece* current_piece = game->current_piece;
-    Rotation original_rotation = current_piece->rotation;
-    int original_shape[4][4];
-    memcpy(original_shape, current_piece->shape, sizeof(current_piece->shape));
-    rotate_piece(current_piece, action);
-
-    int kick_cnt = current_piece->type == I_PIECE ? 2 : 6;
-
-    for (int i = 0; i < kick_cnt; i++) {
-        Bool is_successful = current_piece->type == I_PIECE
-            ? try_displace_piece(game, I_PIECE_180_SRS[(int)original_rotation][i])
-            : try_displace_piece(game, NORMAL_PIECE_180_SRS[(int)original_rotation][i]);
-
-        if (is_successful) {
-            game->state->is_last_rotate = i + 1;
-            return TRUE;
-        }
-    }
-    current_piece->rotation = original_rotation;
-    memcpy(current_piece->shape, original_shape, sizeof(current_piece->shape));
-    return FALSE;
-}
-
-Bool try_rotate_piece(Game* game, RotationAction action) {
-    // return: is_successful
-    Bool rtn;
-    if (action == ROTATE_180) rtn = try_rotate_piece_180(game, action);
-    else rtn = try_rotate_piece_normal(game, action);
-    return rtn;
-}
-
-Bool lock_piece(Game* game) {
-    // return: is_game_over
-    Board* board = game->board;
-    Piece* current_piece = game->current_piece;
-
-    Bool rtn = TRUE;
-    for (int i = 0; i < 4; i++) {
-        for (int j = 0; j < 4; j++) {
-            if (current_piece->shape[i][j] == 0) continue;
-
-            int x = current_piece->x + j;
-            int y = current_piece->y - i;
-
-            if (y < 20) rtn = FALSE;
-            
-            // 【新增修复】防止写入越界
-            // 如果方块锁定时 y 坐标超出了棋盘数组范围，不要写入，防止 Segfault
-            if (x >= 0 && x < board->width && y >= 0 && y < board->height) {
-                board->state[x][y] = (int)current_piece->type + 1;
-            } else {
-                // 如果试图在棋盘外锁定，这通常意味着方块溢出（顶死）
-                // 这种情况下不写入数组，但标记为 Game Over (rtn 逻辑可能需要调整，但防止崩溃最重要)
+Bool board_piece_overlaps(const Board* board, const Piece* p) {
+    uint16_t mask = piece_get_mask(p);
+    for (int dy = 0; dy < 4; dy++) {
+        for (int dx = 0; dx < 4; dx++) {
+            if (mask & (1u << (15 - (dy * 4 + dx)))) {
+                int bx = p->x + dx;
+                int by = p->y - dy;
+                if (bx < 0 || bx >= board->width || by < 0) return true;
+                if (by >= board->height) continue; // 上方缓冲区允许
+                if (board_get_cell(board, bx, by)) return true;
             }
         }
     }
-    return rtn;
+    return false;
 }
-int detect_clear_rows(Game* game) {
-    // before lock_piece
-    Board* board = game->board;
-    Piece* current_piece = game->current_piece;
 
-    int num_rows_cleared = 0;
-    int temp_board[board->width][board->height];
-    memcpy(temp_board, board->state, sizeof(board->state));
-
-    for (int i = 0; i < 4; i++) {
-        for (int j = 0; j < 4; j++) {
-            if (current_piece->shape[i][j] == 0) continue;
-
-            int x = current_piece->x + j;
-            int y = current_piece->y - i;
-            
-            temp_board[x][y] = (int)current_piece->type + 1;
-        }
-    }    
-
-    for (int y = board->height - 1; y >= 0; y--) {
-        Bool is_row_full = TRUE;
-        for (int x = 0; x < board->width; x++) {
-            if (temp_board[x][y] == 0) {
-                is_row_full = FALSE;
-                break;
+static void place_piece(Board* board, const Piece* p) {
+    uint16_t mask = piece_get_mask(p);
+    for (int dy = 0; dy < 4; dy++) {
+        for (int dx = 0; dx < 4; dx++) {
+            if (mask & (1u << (15 - (dy * 4 + dx)))) {
+                int bx = p->x + dx;
+                int by = p->y - dy;
+                if (bx >= 0 && bx < board->width && by >= 0 && by < board->height) {
+                    board_set_cell(board, bx, by, 1);
+                }
             }
         }
-        if (!is_row_full) continue;
-
-        num_rows_cleared++;
-    }
-
-    return num_rows_cleared;
-}
-
-void update_ren(Game* game) {
-    // before lock_piece
-    int num_rows_cleared = detect_clear_rows(game);
-    if (num_rows_cleared == 0) {
-        game->state->ren = -1;
-    }
-    else {
-        game->state->ren += 1;
     }
 }
 
 int clear_rows(Board* board) {
-    int src = 0; // 读取指针
-    int dst = 0; // 写入指针
-    int cleared_count = 0;
-
-    // 1. 扫描有效区域 (0 到 height-1)
-    // 这里的关键是：只处理合法的内存范围
-    while (src < board->height) {
-        Bool is_row_full = TRUE;
-        for (int x = 0; x < board->width; x++) {
-            if (board->state[x][src] == 0) {
-                is_row_full = FALSE;
-                break;
-            }
-        }
-
-        if (is_row_full) {
-            // 这是一个满行，我们跳过它（不复制到 dst），相当于消除了
-            // 可以在这里加调试打印确认
-            // printf("[Fix] Clearing valid row at y=%d\n", src);
-            cleared_count++;
-            src++; // 只移动读取指针
+    int cleared = 0;
+    int dst = 0;
+    for (int src = 0; src < board->height; src++) {
+        if (board_is_row_full(board, src)) {
+            cleared++;
         } else {
-            // 这是一个非满行，保留它
-            if (src != dst) {
-                for (int x = 0; x < board->width; x++) {
-                    board->state[x][dst] = board->state[x][src];
-                }
+            if (dst != src) {
+                board->rows[dst] = board->rows[src];
             }
-            src++;
             dst++;
         }
     }
-
-    // 2. 填充顶部空出的行
     while (dst < board->height) {
-        for (int x = 0; x < board->width; x++) {
-            board->state[x][dst] = 0;
+        board->rows[dst++] = 0;
+    }
+    return cleared;
+}
+
+static Bool is_top_out(const Piece* p) {
+    uint16_t mask = piece_get_mask(p);
+    Bool all_above = true;
+    for (int dy = 0; dy < 4; dy++) {
+        for (int dx = 0; dx < 4; dx++) {
+            if (mask & (1u << (15 - (dy * 4 + dx)))) {
+                int by = p->y - dy;
+                if (by < GAME_VISIBLE_HEIGHT) all_above = false;
+            }
         }
-        dst++;
     }
-
-    return cleared_count;
+    return all_above;
 }
 
-Bool spawn_piece(Game* game) {
-    // return: is_game_over
-    Piece* current_piece = game->current_piece;
-
-    PieceType type;
-    if (game->config->preview_count == 0) {
-        type = bag_next_piece(game->state->bag);
+static int detect_clear_rows(const Board* board, const Piece* p) {
+    Board temp = *board;
+    place_piece(&temp, p);
+    int cleared = 0;
+    for (int y = 0; y < temp.height; y++) {
+        if (board_is_row_full(&temp, y)) cleared++;
     }
-    else {
-        type = next_preview(game->state->previews, bag_next_piece(game->state->bag));
-    }
-    
-
-    Piece* new_piece = init_piece(type);
-    new_piece->x = GAME_SPAWN_X;
-    new_piece->y = GAME_SPAWN_Y;
-    game->current_piece = new_piece;
-    
-    free(current_piece);
-
-    game->state->can_hold_piece = TRUE;
-
-    if (is_overlapping(game->board, new_piece)) return TRUE;
-
-    return FALSE;
+    return cleared;
 }
 
-Bool next_piece(Game* game) {
-    Bool rtn; // is_game_over
-    rtn = lock_piece(game);
-    rtn = rtn || spawn_piece(game);
-    return rtn;
+static Bool game_try_displace(Game* game, int dx, int dy) {
+    Piece* p = &game->current_piece;
+    int ox = p->x;
+    int oy = p->y;
+    p->x += dx;
+    p->y += dy;
+    if (!board_piece_overlaps(&game->board, p)) return true;
+    p->x = ox;
+    p->y = oy;
+    return false;
 }
 
-Bool hold_piece(Game* game) {
-    // return: is_game_over
-    PieceType current_piece_type = game->current_piece->type;
-
-    if (game->state->hold_piece == NULL) {
-        Bool is_game_over = spawn_piece(game);
-        game->state->hold_piece = init_piece(current_piece_type);
-
-        game->state->can_hold_piece = FALSE;
-        return is_game_over;
+Bool game_try_move(Game* game, MoveAction action) {
+    if (game->is_game_over) return false;
+    Piece* p = &game->current_piece;
+    int ox = p->x, oy = p->y;
+    piece_move(p, action);
+    if (action == MOVE_HARD_DROP) {
+        while (!board_piece_overlaps(&game->board, p)) {
+            p->y--;
+        }
+        p->y++; // 回退一步
+        game->state.is_last_rotate = 0;
+        return true;
     }
-    else {
-        Piece* hold_piece = game->state->hold_piece;
-        free_piece(game->current_piece);
-        game->state->hold_piece = init_piece(current_piece_type);
-
-        Piece* new_piece = init_piece(hold_piece->type);
-        new_piece->x = 3;
-        new_piece->y = 21;
-        new_piece->rotation = (Rotation)0;
-        memcpy(new_piece->shape, hold_piece->shape, sizeof(hold_piece->shape));
-
-        free_piece(hold_piece);
-        game->current_piece = new_piece;
-
-        if (is_overlapping(game->board, new_piece)) return TRUE;
-
-        game->state->can_hold_piece = FALSE;
-        return FALSE;
+    if (!board_piece_overlaps(&game->board, p)) {
+        game->state.is_last_rotate = 0;
+        return true;
     }
+    p->x = ox;
+    p->y = oy;
+    return false;
 }
 
-Bool try_hold_piece(Game* game) {
-    // return: is_game_over
-    if (!game->config->is_hold_enabled) return FALSE;
-    if (!game->state->can_hold_piece) return FALSE;
-    return hold_piece(game);
+Bool game_try_rotate(Game* game, RotationAction action) {
+    if (game->is_game_over) return false;
+    Piece* p = &game->current_piece;
+    Rotation orot = p->rotation;
+    piece_rotate(p, action);
+    const int (*kicks)[2];
+    int kick_count;
+    if (action == ROTATE_180) {
+        kick_count = (p->type == PIECE_I) ? 2 : 6;
+        kicks = (p->type == PIECE_I) ? I_PIECE_180_SRS[(int)orot] : NORMAL_PIECE_180_SRS[(int)orot];
+    } else {
+        kick_count = 5;
+        int dir = (action == ROTATE_CW) ? 0 : 1;
+        kicks = (p->type == PIECE_I) ? I_PIECE_NORMAL_SRS[(int)orot][dir] : NORMAL_PIECE_NORMAL_SRS[(int)orot][dir];
+    }
+    for (int i = 0; i < kick_count; i++) {
+        if (game_try_displace(game, kicks[i][0], kicks[i][1])) {
+            game->state.is_last_rotate = i + 1;
+            return true;
+        }
+    }
+    p->rotation = orot;
+    return false;
 }
 
-Bool is_t_triple_corner(Game* game) {
-    Piece* current_piece = game->current_piece;
+Bool game_hold_piece(Game* game) {
+    if (game->is_game_over || !game->config.is_hold_enabled || !game->state.can_hold_piece) return false;
+    PieceType ctype = game->current_piece.type;
+    Rotation crot = game->current_piece.rotation;
+    if (!game->state.has_hold_piece) {
+        game->state.hold_piece.type = ctype;
+        game->state.hold_piece.rotation = 0; // 重置旋转
+        game->state.has_hold_piece = true;
+    } else {
+        PieceType htype = game->state.hold_piece.type;
+        game->state.hold_piece.type = ctype;
+        game->state.hold_piece.rotation = 0;
+        game->current_piece.type = htype;
+        game->current_piece.rotation = 0;
+    }
+    piece_get_spawn_pos(game->current_piece.type, &game->current_piece.x, &game->current_piece.y);
+    game->state.can_hold_piece = false;
+    game->state.is_last_rotate = 0;
+    if (board_piece_overlaps(&game->board, &game->current_piece)) {
+        game->is_game_over = true;
+        return false;
+    }
+    return true;
+}
+
+Bool game_next_step(Game* game) {
+    if (game->is_game_over) return true;
+    place_piece(&game->board, &game->current_piece);
+    if (is_top_out(&game->current_piece)) {
+        game->is_game_over = true;
+        return true;
+    }
+    int cleared = clear_rows(&game->board);
+    game->state.is_last_clear_line = (cleared > 0);
+    if (cleared > 0) {
+        game->state.ren++;
+    } else {
+        game->state.ren = -1;
+    }
+    PieceType type = previews_next(&game->state.previews, bag_next(&game->state.bag));
+    piece_init(&game->current_piece, type);
+    piece_get_spawn_pos(type, &game->current_piece.x, &game->current_piece.y);
+    game->state.can_hold_piece = true;
+    game->state.is_last_rotate = 0;
+    if (board_piece_overlaps(&game->board, &game->current_piece)) {
+        game->is_game_over = true;
+        return true;
+    }
+    return false;
+}
+
+int game_get_shadow_height(const Game* game) {
+    if (game->is_game_over) return 0;
+    Piece temp = game->current_piece;
+    int height = 0;
+    while (!board_piece_overlaps(&game->board, &temp)) {
+        temp.y--;
+        height++;
+    }
+    return height - 1; // 减去最后一步
+}
+
+static Bool is_t_triple_corner(const Game* game) {
+    const Piece* p = &game->current_piece;
     int count = 0;
     for (int i = 0; i < 4; i++) {
-        int x = current_piece->x + T_CORNERS[i][0];
-        int y = current_piece->y - T_CORNERS[i][1];
-        if (
-            game->board->state[x][y] != 0
-            || x < 0
-            || x >= game->board->width
-            || y < 0
-        ) count++;
+        int x = p->x + T_CORNERS[i][0];
+        int y = p->y - T_CORNERS[i][1];
+        if (board_get_cell(&game->board, x, y)) count++; // returns 1 if occupied or out
     }
     return count >= 3;
 }
 
-Bool is_t_rect_has_hole(Game* game) {
-    Piece* current_piece = game->current_piece;
+static Bool is_t_rect_has_hole(const Game* game) {
+    const Piece* p = &game->current_piece;
     int count = 0;
     for (int i = 0; i < 2; i++) {
-        int x = current_piece->x + T_RECTS[(int)current_piece->rotation][i][1];
-        int y = current_piece->y - T_RECTS[(int)current_piece->rotation][i][0];
-        if (game->board->state[x][y] != 0) count++;
+        int x = p->x + T_RECTS[p->rotation][i][0];
+        int y = p->y - T_RECTS[p->rotation][i][1];
+        if (board_get_cell(&game->board, x, y)) count++;
     }
     return count == 1;
 }
 
-Bool is_current_piece_movable(Game* game) {
-    Piece* current_piece = game->current_piece;
-    
-    int original_x = current_piece->x;
-    int original_y = current_piece->y;
-    int directions[4][2] = {
-        {0, 1}, {1, 0}, {0, -1}, {-1, 0}
-    };
+static Bool is_current_piece_movable(const Game* game) {
+    Piece temp = game->current_piece;
+    const int directions[4][2] = {{ -1, 0 }, { 1, 0 }, { 0, -1 }, { 0, 1 }}; // left, right, down, up
     for (int i = 0; i < 4; i++) {
-        current_piece->x = original_x + directions[i][0];
-        current_piece->y = original_y + directions[i][1];
-        // printf("try move: %d, %d\n", current_piece->x, current_piece->y);
-        // printf("is_overlapping: %d\n", is_overlapping(game->board, current_piece));
-        if (!is_overlapping(game->board, current_piece)) {
-            current_piece->x = original_x;
-            current_piece->y = original_y;
-            return TRUE;
-        }
+        temp.x = game->current_piece.x + directions[i][0];
+        temp.y = game->current_piece.y + directions[i][1];
+        if (!board_piece_overlaps(&game->board, &temp)) return true;
     }
-    current_piece->x = original_x;
-    current_piece->y = original_y;
-    return FALSE;
+    return false;
 }
-        
 
-AttackType get_none_spin_attack_type(int num_rows_cleared) {
-    switch (num_rows_cleared) {
+static AttackType get_none_spin_attack_type(int cleared) {
+    switch (cleared) {
         case 1: return ATK_SINGLE;
         case 2: return ATK_DOUBLE;
         case 3: return ATK_TRIPLE;
         case 4: return ATK_TETRIS;
-        default: return ATK_ERROR;
+        default: return ATK_NONE;
     }
 }
 
-AttackType get_t_attack_type(Game* game, int num_rows_cleared) {
-    if (
-        game->state->is_last_rotate == 0
-        || (
-            !is_t_triple_corner(game)
-            // mini+
-            && is_current_piece_movable(game)
-        )
-    ) return get_none_spin_attack_type(num_rows_cleared);
-    // printf("game->state->is_last_rotate: %d\n");
-    if (is_t_rect_has_hole(game) && game->state->is_last_rotate != 5) {
-        // mini
-        switch (num_rows_cleared) {
-            case 1: return ATK_TSMS;
+static AttackType get_t_attack_type(const Game* game, int cleared) {
+    if (game->state.is_last_rotate == 0 || (!is_t_triple_corner(game) && is_current_piece_movable(game))) {
+        return get_none_spin_attack_type(cleared);
+    }
+    if (is_t_rect_has_hole(game) && game->state.is_last_rotate != 5) {
+        switch (cleared) {
+            case 0: return ATK_TSMS; // mini single?
+            case 1: return ATK_TSS;
             case 2: return ATK_TSMD;
             default: return ATK_ERROR;
         }
     }
-    else {
-        // not mini
-        switch (num_rows_cleared) {
-            case 1: return ATK_TSS;
-            case 2: return ATK_TSD;
-            case 3: return ATK_TST;
-            default: return ATK_ERROR;
-        }
-    }
-}
-
-AttackType get_i_attack_type(Game* game, int num_rows_cleared) {
-    if (
-        game->state->is_last_rotate == 0
-        || is_current_piece_movable(game)
-    ) return get_none_spin_attack_type(num_rows_cleared);
-
-    switch (num_rows_cleared) {
-        case 1: return ATK_ISS;
-        case 2: return ATK_ISD;
-        case 3: return ATK_IST;
+    switch (cleared) {
+        case 1: return ATK_TSS;
+        case 2: return ATK_TSD;
+        case 3: return ATK_TST;
         default: return ATK_ERROR;
     }
 }
 
-AttackType get_o_attack_type(Game* game, int num_rows_cleared) {
-    if (
-        game->state->is_last_rotate == 0
-        || is_current_piece_movable(game)
-    ) return get_none_spin_attack_type(num_rows_cleared);
-    
-    switch (num_rows_cleared) {
-        case 1: return ATK_OSS;
-        case 2: return ATK_OSD;
-        default: return ATK_ERROR;
+// 类似为其他类型实现 get_i_attack_type 等，简化假设相同逻辑
+// 对于 I, O, S, Z, J, L: if last_rotate !=0 && !movable, then spin version, else normal.
+
+static AttackType get_spin_attack_type(PieceType type, int cleared, Bool is_spin) {
+    if (!is_spin) return get_none_spin_attack_type(cleared);
+    switch (type) {
+        case PIECE_I:
+            if (cleared == 1) return ATK_ISS;
+            if (cleared == 2) return ATK_ISD;
+            if (cleared == 3) return ATK_IST;
+            break;
+        case PIECE_O:
+            if (cleared == 1) return ATK_OSS;
+            if (cleared == 2) return ATK_OSD;
+            break;
+        case PIECE_S:
+            if (cleared == 1) return ATK_SSS;
+            if (cleared == 2) return ATK_SSD;
+            if (cleared == 3) return ATK_SST;
+            break;
+        case PIECE_Z:
+            if (cleared == 1) return ATK_ZSS;
+            if (cleared == 2) return ATK_ZSD;
+            if (cleared == 3) return ATK_ZST;
+            break;
+        case PIECE_J:
+            if (cleared == 1) return ATK_JSS;
+            if (cleared == 2) return ATK_JSD;
+            if (cleared == 3) return ATK_JST;
+            break;
+        case PIECE_L:
+            if (cleared == 1) return ATK_LSS;
+            if (cleared == 2) return ATK_LSD;
+            if (cleared == 3) return ATK_LST;
+            break;
+        default: break;
+    }
+    return ATK_ERROR;
+}
+
+AttackType game_get_attack_type(const Game* game) {
+    int cleared = detect_clear_rows(&game->board, &game->current_piece);
+    if (cleared == 0) return ATK_NONE;
+    Bool is_spin = (game->state.is_last_rotate != 0 && !is_current_piece_movable(game));
+    if (game->current_piece.type == PIECE_T) {
+        return get_t_attack_type(game, cleared);
+    } else {
+        return get_spin_attack_type(game->current_piece.type, cleared, is_spin);
     }
 }
 
-AttackType get_s_attack_type(Game* game, int num_rows_cleared) {
-    if (
-        game->state->is_last_rotate == 0
-        || is_current_piece_movable(game)
-    ) return get_none_spin_attack_type(num_rows_cleared);
-    
-    switch (num_rows_cleared) {
-        case 1: return ATK_SSS;
-        case 2: return ATK_SSD;
-        case 3: return ATK_SST;
-        default: return ATK_ERROR;
+Bool game_is_perfect_clear(const Game* game) {
+    Board temp = game->board;
+    place_piece(&temp, &game->current_piece);
+    clear_rows(&temp);
+    for (int y = 0; y < temp.height; y++) {
+        if (!board_is_row_empty(&temp, y)) return false;
     }
+    return true;
 }
 
-AttackType get_z_attack_type(Game* game, int num_rows_cleared) {
-    if (
-        game->state->is_last_rotate == 0
-        || is_current_piece_movable(game)
-    ) return get_none_spin_attack_type(num_rows_cleared);
-    
-    switch (num_rows_cleared) {
-        case 1: return ATK_ZSS;
-        case 2: return ATK_ZSD;
-        case 3: return ATK_ZST;
-        default: return ATK_ERROR;
-    }
-}
-
-AttackType get_j_attack_type(Game* game, int num_rows_cleared) {
-    if (
-        game->state->is_last_rotate == 0
-        || is_current_piece_movable(game)
-    ) return get_none_spin_attack_type(num_rows_cleared);
-    
-    switch (num_rows_cleared) {
-        case 1: return ATK_JSS;
-        case 2: return ATK_JSD;
-        case 3: return ATK_JST;
-        default: return ATK_ERROR;
-    }
-}
-
-AttackType get_l_attack_type(Game* game, int num_rows_cleared) {
-    if (
-        game->state->is_last_rotate == 0
-        || is_current_piece_movable(game)
-    ) return get_none_spin_attack_type(num_rows_cleared);
-    
-    switch (num_rows_cleared) {
-        case 1: return ATK_LSS;
-        case 2: return ATK_LSD;
-        case 3: return ATK_LST;
-        default: return ATK_ERROR;
-    }
-}
-
-
-AttackType get_attack_type(Game* game) {
-    // before lock_piece
-    int num_rows_cleared = detect_clear_rows(game);
-    if (num_rows_cleared == 0) return ATK_NONE;
-
-    switch (game->current_piece->type) {
-        case T_PIECE: return get_t_attack_type(game, num_rows_cleared);
-        case I_PIECE: return get_i_attack_type(game, num_rows_cleared);
-        case O_PIECE: return get_o_attack_type(game, num_rows_cleared);
-        case S_PIECE: return get_s_attack_type(game, num_rows_cleared);
-        case Z_PIECE: return get_z_attack_type(game, num_rows_cleared);
-        case J_PIECE: return get_j_attack_type(game, num_rows_cleared);
-        case L_PIECE: return get_l_attack_type(game, num_rows_cleared);
-        default: return ATK_ERROR;
-    }
-}
-
-Bool is_perfect_clear(Game* game) {
-    Board* board = game->board;
-    Piece* current_piece = game->current_piece;
-
-    int temp_board[board->width][board->height];
-    memcpy(temp_board, board->state, sizeof(board->state));
-
-    for (int i = 0; i < 4; i++) {
-        for (int j = 0; j < 4; j++) {
-            if (current_piece->shape[i][j] == 0) continue;
-
-            int x = current_piece->x + j;
-            int y = current_piece->y - i;
-            
-            temp_board[x][y] = (int)current_piece->type + 1;
-        }
-    }    
-
-    for (int y = board->height - 1; y >= 0; y--) {
-        Bool is_row_full = TRUE;
-        for (int x = 0; x < board->width; x++) {
-            if (temp_board[x][y] == 0) {
-                is_row_full = FALSE;
-                break;
-            }
-        }
-        if (!is_row_full) continue;
-
-        for (int yy = y; yy <= board->height - 1; yy++) {
-            for (int x = 0; x < board->width; x++) {
-                temp_board[x][yy] = temp_board[x][yy + 1];
-            }
-        }
-        for (int x = 0; x < board->width; x++) {
-            temp_board[x][board->height - 1] = 0;
-        }
-    }
-
-    for (int y = 0; y < board->height; y++) {
-        for (int x = 0; x < board->width; x++) {
-            if (temp_board[x][y] != 0) return FALSE;
-        }
-    }
-    return TRUE;
-}
-
-
-// Not core functions
-
-Bool is_grounded(Game* game) {
-    Piece* current_piece = game->current_piece;
-    
-    current_piece->y--;
-    Bool rtn = is_overlapping(game->board, current_piece);
-    current_piece->y++;
-
-    return rtn;
-}
-
-int get_shadow_height(Game* game) {
-    Piece* current_piece = game->current_piece;
-
-    if (is_overlapping(game->board, current_piece)) return 0;
-
-    int shadow_height = -1;
-    int original_y = current_piece->y;
-    while (!is_overlapping(game->board, current_piece)) {
-        current_piece->y--;
-        shadow_height++;
-    }
-    current_piece->y = original_y;
-    
-    return shadow_height;
+static Bool is_grounded(const Game* game) {
+    Piece temp = game->current_piece;
+    temp.y--;
+    return board_piece_overlaps(&game->board, &temp);
 }

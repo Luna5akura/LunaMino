@@ -1,64 +1,35 @@
 // core/game/bag/bag.c
 
 #include "bag.h"
-#include <stdlib.h>
-#include <string.h>
+// 如果 _rng_next 没有在其他地方定义，可以在这里定义
+unsigned long _rng_next = 1; 
 
-void shuffle_sequence(PieceType sequence[7]) {
-    // 1. 先填充 0-6
+static void _shuffle(Bag* bag) {
     for (int i = 0; i < 7; i++) {
-        sequence[i] = (PieceType)i;
+        bag->sequence[i] = (PieceType)i;
     }
-
-    // 2. Fisher-Yates 洗牌
     for (int i = 6; i > 0; i--) {
-        // 【修复】使用 rand() 代替 random()，并强制取正，防止负数索引越界
-        int r = rand(); 
-        if (r < 0) r = -r;
-        int j = r % (i + 1);
-
-        PieceType temp = sequence[i];
-        sequence[i] = sequence[j];
-        sequence[j] = temp;
+        int j = magic_random() % (i + 1);
+        
+        PieceType temp = bag->sequence[i];
+        bag->sequence[i] = bag->sequence[j];
+        bag->sequence[j] = temp;
     }
 }
 
-Bag* init_bag() {
-    Bag* bag = (Bag*)malloc(sizeof(Bag));
-    // 【修复】清零内存
-    memset(bag, 0, sizeof(Bag));
+void bag_init(Bag* bag) {
+    _shuffle(bag);
+    bag->head = 0;
+}
+
+PieceType bag_next(Bag* bag) {
+    PieceType piece = bag->sequence[bag->head];
     
-    shuffle_sequence(bag->sequence);
-    bag->current = 0;
-    return bag;
-}
-
-void free_bag(Bag* bag) {
-    if (bag) free(bag);
-}
-
-Bag* copy_bag(Bag* bag) {
-    if (!bag) return NULL;
-    Bag* new_bag = (Bag*)malloc(sizeof(Bag));
-    memcpy(new_bag, bag, sizeof(Bag));
-    return new_bag;
-}
-
-PieceType bag_next_piece(Bag* bag) {
-    if (!bag) return (PieceType)0;
-
-    bag->current = bag->current + 1;
-    if (bag->current >= 7) {
-        shuffle_sequence(bag->sequence);
-        bag->current = 0;
+    bag->head++;
+    if (bag->head >= 7) {
+        _shuffle(bag);
+        bag->head = 0;
     }
     
-    // 【安全检查】
-    if (bag->current < 0 || bag->current > 6) bag->current = 0;
-    
-    PieceType t = bag->sequence[bag->current];
-    // 再次检查类型范围
-    if (t < 0 || t > 6) t = (PieceType)0;
-    
-    return t;
+    return piece;
 }

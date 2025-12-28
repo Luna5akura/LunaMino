@@ -1,94 +1,72 @@
 // core/game/game.h
-
 #ifndef GAME_H
 #define GAME_H
-
 #include "../../util/util.h"
 #include "../piece/piece.h"
 #include "../board/board.h"
 #include "previews/previews.h"
 #include "bag/bag.h"
-
-
 typedef enum {
     ATK_NONE,
-    ATK_SINGLE,
-    ATK_DOUBLE,
-    ATK_TRIPLE,
-    ATK_TETRIS,
-    ATK_TSMS,
-    ATK_TSS,
-    ATK_TSMD,
-    ATK_TSD,
-    ATK_TST,
-    ATK_ISS,
-    ATK_ISD,
-    ATK_IST,
-    ATK_OSS,
-    ATK_OSD,
-    ATK_SSS,
-    ATK_SSD,
-    ATK_SST,
-    ATK_ZSS,
-    ATK_ZSD,
-    ATK_ZST,
-    ATK_JSS,
-    ATK_JSD,
-    ATK_JST,
-    ATK_LSS,
-    ATK_LSD,
-    ATK_LST,
+    ATK_SINGLE, ATK_DOUBLE, ATK_TRIPLE, ATK_TETRIS,
+    ATK_TSMS, ATK_TSS, ATK_TSMD, ATK_TSD, ATK_TST,
+    ATK_ISS, ATK_ISD, ATK_IST,
+    ATK_OSS, ATK_OSD,
+    ATK_SSS, ATK_SSD, ATK_SST,
+    ATK_ZSS, ATK_ZSD, ATK_ZST,
+    ATK_JSS, ATK_JSD, ATK_JST,
+    ATK_LSS, ATK_LSD, ATK_LST,
     ATK_ERROR,
 } AttackType;
-
 typedef struct {
     int preview_count;
     Bool is_hold_enabled;
-    int seed;
+    unsigned int seed;
 } GameConfig;
-
 typedef struct {
-    Bag* bag;
-    Previews* previews;
-    Piece* hold_piece;
+    Bag bag;
+    Previews previews;
+   
+    Piece hold_piece;
+    Bool has_hold_piece;
     Bool can_hold_piece;
-    int is_last_rotate; // 0: not rotate, 1-4: rotate, 5: rotate-5
+   
+    int is_last_rotate; // 0: none, 1-5: normal kicks, for 180 separate but unified
     Bool is_last_clear_line;
-    int ren;
+    int ren; // Combo count
 } GameState;
-
+// 主游戏对象
+// 优化：单一大对象，内存连续
 typedef struct {
-    GameConfig* config;
-    GameState* state;
-    Board* board;
-    Piece* current_piece;
+    GameConfig config;
+    GameState state;
+    Board board;
+    Piece current_piece;
+    Bool is_game_over; // 新增：方便快速判断游戏结束
 } Game;
+// --- API ---
+// 初始化游戏 (只进行一次 malloc)
+Game* game_init(const GameConfig* config);
+// 释放游戏
+void game_free(Game* game);
+// 极速复制游戏 (用于 AI 推演)
+// 由于内存连续，这等同于 memcpy
+Game* game_copy(const Game* src);
+// 核心逻辑
+Bool game_try_move(Game* game, MoveAction action);
+Bool game_try_rotate(Game* game, RotationAction action);
+Bool game_hold_piece(Game* game);
+// 推进游戏进程 (锁定 -> 消行 -> 生成下一个)
+// 返回 TRUE 表示游戏结束
+Bool game_next_step(Game* game);
+// 辅助查询
+int game_get_shadow_height(const Game* game); // 此时不需要修改 game，加 const
+AttackType game_get_attack_type(const Game* game); // 需要根据当前状态判断
+Bool game_is_perfect_clear(const Game* game);
 
-// --- [新增/修改] 公开这些初始化函数的声明，以便 ai_reset_game 调用 ---
-GameConfig* init_game_config();
-void free_game_config(GameConfig* config);
-GameState* init_game_state(GameConfig* config);
-void free_game_state(GameState* state);
-// -------------------------------------------------------------
 
-Game* init_game();
-void free_game(Game* game);
-Game* copy_game(Game* game);
 
-Bool try_move_piece(Game* game, MoveAction action);
-Bool try_rotate_piece(Game* game, RotationAction action);
 int clear_rows(Board* board);
-Bool next_piece(Game* game);
-Bool try_hold_piece(Game* game);
-Bool is_grounded(Game* game);
-Bool lock_piece(Game* game);
-Bool spawn_piece(Game* game);
-int get_shadow_height(Game* game);
-AttackType get_attack_type(Game* game);
-Bool is_t_triple_corner(Game* game);
-Bool is_perfect_clear(Game* game);
-void update_ren(Game* game);
-Bool is_overlapping(Board* board, Piece* piece);
-Bool hard_drop(Piece* piece, Board* board);
+Bool board_piece_overlaps(const Board* board, const Piece* p);
 
 #endif

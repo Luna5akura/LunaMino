@@ -3,37 +3,50 @@
 #ifndef PIECE_H
 #define PIECE_H
 
+#include <stdint.h>
+#include <stdbool.h>
+
 typedef enum {
-    I_PIECE, O_PIECE, T_PIECE, S_PIECE, Z_PIECE, J_PIECE, L_PIECE
+    PIECE_I = 0,
+    PIECE_O,
+    PIECE_T,
+    PIECE_S,
+    PIECE_Z,
+    PIECE_J,
+    PIECE_L,
+    PIECE_COUNT
 } PieceType;
 
-typedef enum {
-    UP, RIGHT, DOWN, LEFT
-} Rotation;
-
-typedef enum {
-    MOVE_LEFT, MOVE_RIGHT, MOVE_DOWN, MOVE_SOFT_DROP, MOVE_HARD_DROP
-} MoveAction;
-
-typedef enum {
-    ROTATE_CW, ROTATE_CCW, ROTATE_180 
-} RotationAction;
+// 0: 0 deg, 1: 90 deg (CW), 2: 180 deg, 3: 270 deg (CCW)
+typedef int Rotation; 
 
 typedef struct {
     PieceType type;    
-    int x, y;         // Left-top corner of the 4x4 shape in the board, global position starts from left-bottom corner of the board
-    Rotation rotation;     // 0 is up, 1 is right, 2 is down, 3 is left
-    int shape[4][4];  // 0 is empty, 1 is filled
+    Rotation rotation;
+    int x;
+    int y;         // Left-top corner of the 4x4 shape in the board, global position starts from left-bottom corner of the board
 } Piece;
 
-extern const int PIECE_SHAPES[7][4][4][4];
+typedef enum {
+    MOVE_LEFT,
+    MOVE_RIGHT,
+    MOVE_DOWN,
+    MOVE_SOFT_DROP,
+    MOVE_HARD_DROP
+} MoveAction;
 
-Piece* init_piece(PieceType type);
-void free_piece(Piece* piece);
-Piece* copy_piece(Piece* piece);
-void move_piece(Piece* piece, MoveAction action);
-void displace_piece(Piece* piece, const int direction[2]);
-void rotate_piece(Piece* piece, RotationAction action);
+typedef enum {
+    ROTATE_CW,
+    ROTATE_CCW,
+    ROTATE_180
+} RotationAction;
+
+
+void piece_init(Piece* p, PieceType type);
+uint16_t piece_get_mask(const Piece* p);
+void piece_move(Piece* p, MoveAction action);
+void piece_rotate(Piece* p, RotationAction action);
+void piece_get_spawn_pos(PieceType type, int* x, int* y);
 
 #endif
 

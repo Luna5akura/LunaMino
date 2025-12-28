@@ -39,17 +39,19 @@ class StepResult(ctypes.Structure):
     ]
 
 # 定义函数签名
+lib.create_tetris.argtypes = [ctypes.c_int]
+lib.create_tetris.restype = ctypes.c_void_p
+lib.destroy_tetris.argtypes = [ctypes.c_void_p]
+lib.clone_tetris.argtypes = [ctypes.c_void_p]
+lib.clone_tetris.restype = ctypes.c_void_p
+
 lib.ai_reset_game.argtypes = [ctypes.c_void_p, ctypes.c_int]
 lib.ai_get_state.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_int), ctypes.POINTER(ctypes.c_int), ctypes.POINTER(ctypes.c_int), ctypes.POINTER(ctypes.c_int)]
 lib.ai_get_legal_moves.argtypes = [ctypes.c_void_p, ctypes.POINTER(LegalMoves)]
 lib.ai_step.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_int, ctypes.c_int]
 lib.ai_step.restype = StepResult
 lib.ai_receive_garbage.argtypes = [ctypes.c_void_p, ctypes.c_int]
-lib.init_tetris.restype = ctypes.c_void_p
-lib.init_game.restype = ctypes.c_void_p
-lib.free_tetris.argtypes = [ctypes.c_void_p]
-lib.copy_tetris.argtypes = [ctypes.c_void_p]
-lib.copy_tetris.restype = ctypes.c_void_p
+
 lib.ai_enable_visualization.argtypes = [ctypes.c_void_p]
 lib.ai_render.argtypes = [ctypes.c_void_p]
 lib.ai_close_visualization.argtypes = []
@@ -62,37 +64,22 @@ class TetrisGame:
     def __init__(self, seed=None, ptr=None):
         if ptr:
             self.ptr = ptr
-            self.owned = True 
+            self.owned = True
         else:
             if seed is None:
-                seed = random.randint(0, 1000000)
-            
-            # --- 修改开始 ---
-            # 不要先创建 init_game，直接传 None 给 init_tetris
-            # init_tetris 在 C 中会将 tetris->game 设为 NULL
-            # ai_reset_game 检查到 NULL 会跳过 free，直接 malloc 新的 game
-            print(f"[DEBUG] Calling lib.init_tetris(None)...")
-            self.ptr = lib.init_tetris(None) 
-            
+                seed = 0  # Let C use time(NULL) for auto different
+            self.ptr = lib.create_tetris(seed)
             if not self.ptr:
-                 print("[ERROR] init_tetris returned NULL!")
-                 return
-
-            print(f"[DEBUG] Calling lib.ai_reset_game({self.ptr}, {seed})...")
-            lib.ai_reset_game(self.ptr, seed)
-            print("[DEBUG] Init complete.")
-            # --- 修改结束 ---
-            
+                raise RuntimeError("Failed to create Tetris")
             self.owned = True
 
     def __del__(self):
         if self.owned and self.ptr:
-            lib.free_tetris(self.ptr)
+            lib.destroy_tetris(self.ptr)
             self.ptr = None
 
     def clone(self):
-        """用于MCTS：深拷贝当前游戏状态"""
-        new_ptr = lib.copy_tetris(self.ptr)
+        new_ptr = lib.clone_tetris(self.ptr)
         return TetrisGame(ptr=new_ptr)
 
     def get_state(self):
