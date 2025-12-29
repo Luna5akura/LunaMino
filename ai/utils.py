@@ -1,4 +1,4 @@
-# ai/utils.py (加 print len(legal_moves) 调试)
+# ai/utils.py (with modifications for debugging and context inclusion)
 import ctypes
 import os
 import random
@@ -41,13 +41,12 @@ lib.ai_receive_garbage.argtypes = [ctypes.c_void_p, ctypes.c_int]
 lib.ai_reset_game.argtypes = [ctypes.c_void_p, ctypes.c_int]
 lib.ai_get_state.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_int), ctypes.POINTER(ctypes.c_int), ctypes.POINTER(ctypes.c_int), ctypes.POINTER(ctypes.c_int)]
 lib.ai_get_legal_moves.argtypes = [ctypes.c_void_p, ctypes.POINTER(LegalMoves)]
-lib.ai_step.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_int]  # ptr, x, y, rotation, use_hold
+lib.ai_step.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_int] # ptr, x, y, rotation, use_hold
 lib.ai_step.restype = StepResult
 lib.ai_receive_garbage.argtypes = [ctypes.c_void_p, ctypes.c_int]
 lib.ai_enable_visualization.argtypes = [ctypes.c_void_p]
 lib.ai_render.argtypes = [ctypes.c_void_p]
 lib.ai_close_visualization.argtypes = []
-
 # ==========================================
 # Python Wrapper
 # ==========================================
@@ -84,30 +83,30 @@ class TetrisGame:
         # Channel 0: Board (0/1)
         # Channel 1: Current Piece Indicator (One-hot ideally, but here simplified)
         # Channel 2: Ghost Piece (Optional, skipped for now)
-       
+      
         board = np.array(board_buf).reshape(20, 10) # y, x
         board = np.flip(board, axis=0).copy()
-       
+      
         # 翻转 y 轴，让底部在下面 (如果在 C 中 y=0 是底部)
         # 通常神经网络喜欢 y=0 在左上角或符合直觉，这里保持 C 的原始数据
         # C 代码: y=0 是底部。
-       
+      
         # 构造 Context Vector
-        # [Hold Type, Next1, Next2, Next3, Next4, Next5, B2B, Combo, CanHold]
+        # [Current Type, Hold Type, Next1, Next2, Next3, Next4, Next5, B2B, Combo, CanHold]
+        current_piece_type = meta_buf[3]
         context = np.concatenate([
+            np.array([current_piece_type]),
             np.array(hold_buf),
             np.array(queue_buf),
-            np.array(meta_buf)[:3] # b2b, ren, can_hold
+            np.array(meta_buf[:3]) # b2b, ren, can_hold
         ])
-       
-        current_piece_type = meta_buf[3]
-       
-        return board, context, current_piece_type
+      
+        return board, context
     def get_legal_moves(self):
         """返回所有合法落点 [(x, y, rot), ...]"""
         moves_struct = LegalMoves()
         lib.ai_get_legal_moves(self.ptr, ctypes.byref(moves_struct))
-       
+      
         results = []
         for i in range(moves_struct.count):
             m = moves_struct.moves[i]
@@ -118,7 +117,7 @@ class TetrisGame:
                 'use_hold': m.use_hold,
                 'landing_height': m.landing_height # Not fully implemented in C yet, but struct has it
             })
-        # print(f"[DEBUG] Legal moves count: {len(results)}")  # 新: 调试 print
+        # print(f"[DEBUG] Legal moves count: {len(results)}") # 新: 调试 print
         return results
     def step(self, x, y, rotation, use_hold):
         res = lib.ai_step(self.ptr, x, y, rotation, use_hold)
@@ -137,7 +136,6 @@ class TetrisGame:
     def render(self):
         """绘制一帧"""
         lib.ai_render(self.ptr)
-   
+  
     def close_render(self):
         lib.ai_close_visualization()
-

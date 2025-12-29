@@ -328,7 +328,7 @@ void tetris_receive_garbage_line(Tetris* tetris, int line_count) {
     Board* board = &tetris->game.board;
     int hole_column = magic_random() % board->width;
     // shift rows up
-    for (int y = 0; y < board->height - line_count; y++) {
+    for (int y = board->height - 1 - line_count; y >= 0; y--) {
         board->rows[y + line_count] = board->rows[y];
     }
     // add garbage

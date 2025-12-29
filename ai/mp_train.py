@@ -1,3 +1,5 @@
+# ai/mp_train.py (modified for new structure)
+
 import torch
 import torch.nn.functional as F
 import torch.optim as optim
@@ -11,7 +13,7 @@ import shutil
 from collections import deque, defaultdict
 # 引入模块 (确保你在项目根目录下运行，或者设置了 PYTHONPATH)
 from .utils import TetrisGame
-from .model import TetrisNet
+from .model import TetrisPolicyValue
 from .mcts import MCTS
 from . import config
 from .reward import get_reward, calculate_heuristics
@@ -72,36 +74,66 @@ def worker_process(rank, shared_model, data_queue, device):
         from .utils import lib
         game_seed = random.randint(0, 1000000)
         lib.ai_reset_game(game.ptr, game_seed)
+        garbage_lines = random.randint(1, 2)
+        game.receive_garbage(garbage_lines)
+        game.receive_garbage(garbage_lines)
+        game.receive_garbage(garbage_lines)
+        game.receive_garbage(garbage_lines)
+        print(f"[Worker {rank}] Added {garbage_lines} garbage lines at start.")  # 可选日志
         monitor = StatsMonitor()
         steps = 0
         game_data = []
-        board, _, _ = game.get_state()
+        board, _ = game.get_state()
         prev_metrics = calculate_heuristics(board)
         while True:
-            # if rank == 0: print(f"[Worker {rank}] MCTS run at step {steps}")
-            # 新: 先获取 legal_moves
             legal = game.get_legal_moves()
+            if len(legal) == 0: # 新: 处理无合法动作（game over）
+                res = {'game_over': True} # 模拟 game_over
+                break
+           
             root = mcts.run(game)
             temp = 1.0 if steps < 20 else 0.5
             action_probs = mcts.get_action_probs(root, temp=temp)
-            board, ctx, p_type = game.get_state()
-            game_data.append([board, ctx, p_type, action_probs, None])
-            action_idx = np.random.choice(len(action_probs), p=action_probs)
-            # 新: 用 rel idx 取 full move
-            move = legal[action_idx]
-            # 现在调用 step with 4 args
+            board, ctx = game.get_state()
+            game_data.append([board, ctx, action_probs, None])
+           
+            # 新: 采样全局 idx
+            global_idx = np.random.choice(len(action_probs), p=action_probs)
+           
+            # 新: 映射回局部 idx
+            if root.legal_indices is None: # 不应发生，但防备
+                raise ValueError(f"[Worker {rank}] No legal indices at step {steps}")
+            local_idx = root.legal_indices.index(global_idx)
+           
+            move = legal[local_idx]
             res = game.step(move['x'], move['y'], move['rotation'], move['use_hold'])
-            if rank == 0 and steps%1==0: print(f"[Worker {rank}] Step {steps}, res={res}")
-            # if rank == 0 and steps%5==0: print(f"[Worker {rank}] Step {steps}, res={res}")
+           
+            if rank == 0 and steps % 1 == 0:
+                    print(f"[Worker {rank}] Step {steps}, res={res}")
+            # 新: 检查 missed clear (occasional)
+            if steps % 10 == 0:
+                missed = False
+                chosen_lines = res['lines_cleared']
+                for test_move in legal:
+                    clone = game.clone()
+                    test_res = clone.step(test_move['x'], test_move['y'], test_move['rotation'], test_move['use_hold'])
+                    if test_res['lines_cleared'] > chosen_lines:
+                        missed = True
+                        break
+                    del clone
+                if missed:
+                    print(f"[DEBUG Worker {rank}] Step {steps}: Missed clear opportunity! Chosen lines={chosen_lines}")
+           
             total_worker_steps += 1
             if total_worker_steps % 100 == 0:
                 elapsed = time.time() - start_time
                 pps = 100 / elapsed
                 monitor.update("pps", pps, 'set')
                 start_time = time.time()
-            next_board, _, _ = game.get_state()
+            next_board, _ = game.get_state()
             cur_metrics = calculate_heuristics(next_board)
             step_reward, force_over = get_reward(res, cur_metrics, prev_metrics, is_training=True)
+            print(f"[Worker {rank}] Step {steps}: Reward {step_reward:.2f}, Lines {res['lines_cleared']}, Holes  {cur_metrics['holes']}")
             if force_over:
                 res['game_over'] = True
             monitor.update("score", step_reward, 'sum')
@@ -124,7 +156,7 @@ def worker_process(rank, shared_model, data_queue, device):
         stats = monitor.get_summary()
         final_val = np.tanh(stats['score'] / 100.0)
         for item in game_data:
-            item[4] = final_val
+            item[3] = final_val
         data_queue.put((game_data, stats))
         # if rank == 0: print(f"[Worker {rank}] Put packet with {len(game_data)} items")
 # ==========================================
@@ -143,10 +175,10 @@ def save_memory_safe(memory, filename):
         # 将 deque 转为 list 再保存，兼容性更好
         data_to_save = list(memory)
         print(f"[System] Saving memory ({len(data_to_save)} items) to disk...")
-       
+      
         with open(temp_name, 'wb') as f:
             pickle.dump(data_to_save, f)
-           
+          
         # 原子操作：重命名
         if os.path.exists(filename):
             os.remove(filename)
@@ -163,19 +195,19 @@ def save_memory_safe(memory, filename):
 def train_manager():
     # Windows/MacOS 需要 spawn
     mp.set_start_method('spawn', force=True)
-  
+ 
     # --- [新增] 确保备份文件夹存在 ---
     backup_dir = "backups"
     if not os.path.exists(backup_dir):
         os.makedirs(backup_dir)
         print(f"[Manager] Created backup directory: {backup_dir}")
     print(f"[Manager] Initializing {config.NUM_WORKERS} workers on {config.DEVICE}...")
-  
+ 
     # ... (中间的初始化代码 shared_model, optimizer, data_queue 等保持不变) ...
-    shared_model = TetrisNet().to(config.DEVICE)
+    shared_model = TetrisPolicyValue().to(config.DEVICE)
     shared_model.share_memory()
     optimizer = optim.Adam(shared_model.parameters(), lr=config.LR)
-  
+ 
     start_idx = 0
     if os.path.exists(config.CHECKPOINT_FILE):
         try:
@@ -192,8 +224,7 @@ def train_manager():
         p = mp.Process(target=worker_process, args=(rank, shared_model, data_queue, config.DEVICE))
         p.start()
         processes.append(p)
-  
-    # 加载 Memory
+ 
     # 加载 Memory
     memory = deque(maxlen=config.MEMORY_SIZE)
     if os.path.exists(config.MEMORY_FILE):
@@ -238,14 +269,15 @@ def train_manager():
                         history[k].append(stats.get(k, 0))
                     game_cnt += 1
                     received_packets += 1
+                    print(f"[Game {game_cnt}] Final Reward: {stats['score']:.2f}, Lines: {stats['lines']}")
                 except:
                     break
-           
+          
             # print(f"[Manager] Received {received_packets} packets, game_cnt={game_cnt}")
             # 2. 只在有新数据时更新内存、训练、保存
             if received_packets > 0:
                 memory.extend(new_data)
-               
+              
                 # 打印日志 (每20局)
                 if game_cnt % 20 == 0:
                     avg = {k: np.mean(v) if len(v) > 0 else 0 for k, v in history.items()}
@@ -254,23 +286,22 @@ def train_manager():
                     print(f" Score : {avg['score']:6.2f} | Steps : {avg['steps']:5.1f} | Lines : {avg['lines']:.2f}")
                     print(f" Holes/Stp: {avg['holes_step']:6.2f} | MaxHt : {avg['max_height']:5.1f} | Tetris: {avg['tetrises']:.2f}")
                     print("-" * 75, "\n")
-               
+              
                 # 3. 训练网络 (有新数据时才训练)
                 if len(memory) >= config.BATCH_SIZE:
                     # ... (Batch采样和训练代码保持不变) ...
                     batch = random.sample(memory, config.BATCH_SIZE)
                     b_board = torch.tensor(np.array([x[0] for x in batch]), dtype=torch.float32).to(config.DEVICE)
                     b_ctx = torch.tensor(np.array([x[1] for x in batch]), dtype=torch.float32).to(config.DEVICE)
-                    b_ptype = torch.tensor(np.array([x[2] for x in batch]), dtype=torch.long).to(config.DEVICE)
-                    b_policy = torch.tensor(np.array([x[3] for x in batch]), dtype=torch.float32).to(config.DEVICE)
-                    b_value = torch.tensor(np.array([x[4] for x in batch]), dtype=torch.float32).unsqueeze(1).to(config.DEVICE)
-                   
+                    b_policy = torch.tensor(np.array([x[2] for x in batch]), dtype=torch.float32).to(config.DEVICE)
+                    b_value = torch.tensor(np.array([x[3] for x in batch]), dtype=torch.float32).unsqueeze(1).to(config.DEVICE)
+                  
                     optimizer.zero_grad()
-                    p, v = shared_model(b_board, b_ctx, b_ptype)
+                    p, v = shared_model(b_board, b_ctx)
                     loss = -torch.sum(b_policy * F.log_softmax(p, dim=1), dim=1).mean() + F.mse_loss(v, b_value)
                     loss.backward()
                     optimizer.step()
-                   
+                  
                     # ==========================================
                     # --- [重点修改] 保存与备份逻辑 ---
                     # ==========================================
@@ -282,7 +313,7 @@ def train_manager():
                             'optimizer_state_dict': optimizer.state_dict(),
                             'game_idx': game_cnt
                         }, config.CHECKPOINT_FILE)
-                       
+                      
                         save_memory_safe(memory, config.MEMORY_FILE)
                         # 2. 创建 Checkpoint 副本 (每500局)
                         if game_cnt % 100 == 0:
@@ -303,7 +334,7 @@ def train_manager():
                                 print(f"[Backup] Copied memory to {mem_backup_path}")
                             except Exception as e:
                                 print(f"[Backup Error] Failed to copy memory: {e}")
-           
+          
             else:
                 time.sleep(0.1) # No new data, sleep to avoid busy loop
     except KeyboardInterrupt:
@@ -311,7 +342,7 @@ def train_manager():
         for p in processes:
             p.terminate()
             p.join()
-       
+      
         # 退出时保存最后一次
         torch.save({
             'model_state_dict': shared_model.state_dict(),
