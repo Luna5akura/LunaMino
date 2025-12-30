@@ -1,72 +1,66 @@
 # ==========================================
-# Tetris Project Makefile (Updated)
+# Tetris AI Bridge Makefile (Shared Only)
 # ==========================================
+
 CC = gcc
-# 编译选项: 添加 -g for debug if needed
-# CFLAGS = -Wall -O1 -fPIC -g -fsanitize=address -fno-omit-frame-pointer
-CFLAGS = -Wall -O0 -fPIC -g
-# 头文件路径 (添加 core/battle if needed)
-INCLUDE = -Icore/board -Icore/game -Icore/piece -Iutil -Iai -Icore/tetris -Icore/battle -Icore/console -Icore/bridge
-# 核心源文件 (包含所有逻辑 + 新接口 in game.c)
-LOGIC_SOURCES = core/board/board.c \
-                core/game/game.c \
-                core/game/bag/bag.c \
-                core/game/previews/previews.c \
-                core/piece/piece.c \
-                core/tetris/tetris.c \
-                core/bridge/bridge.c \
-                core/tetris/tetris_ui/tetris_ui.c
-COMMON_SOURCES = core/board/board.c \
-core/game/game.c \
-core/game/bag/bag.c \
-core/game/previews/previews.c \
-core/piece/piece.c \
-core/tetris/tetris.c \
-core/tetris/tetris_ui/tetris_ui.c \
-core/tetris/tetris_history/tetris_history.c \
-core/battle/battle.c \
-core/console/console.c
-# Bridge for AI: 如果添加 ai/bridge.c, 包含在这里; 否则 game.c 已足够
-# 目标文件名
-SHARED_LIB = libtetris.so
-RAYLIB_EXE = tetris-raylib
-CONSOLE_EXE = tetris-console
-TRAIN_EXE = tetris-train # 如果有C训练入口，可添加
-# 链接选项
-SHARED_LDFLAGS = -shared -lm -lraylib
-# Raylib 链接 (调整为您的系统)
-RAYLIB_LDFLAGS = -lraylib -lm -lpthread -ldl -lrt
+
+# 1. 编译选项
+# -fPIC: 生成位置无关代码 (必须用于动态库)
+# -DSHARED_LIB=1: 告知代码当前是编译动态库模式
+# -g: 保留调试符号 (Python调用出错时能看到栈信息)
+CFLAGS = -Wall -O3 -fPIC -g -DSHARED_LIB=1
+
+# 2. 头文件路径
+# 注意：添加了 tetris_ui 的路径，确保 bridge.c 能找到 ui 头文件
+INCLUDE = -Icore/board \
+          -Icore/game \
+          -Icore/piece \
+          -Iutil \
+          -Icore/tetris \
+          -Icore/tetris/tetris_ui \
+          -Icore/bridge
+
+# 3. 链接选项
+# -lraylib: 必须链接 raylib，因为 bridge.c 和 tetris_ui.c 用到了它
+# -lm: 数学库
+LDFLAGS = -shared -lm -lraylib
+
+# 4. 源文件列表
+# 包含了完整的游戏逻辑 + UI + Bridge
+SOURCES = core/board/board.c \
+          core/game/game.c \
+          core/game/bag/bag.c \
+          core/game/previews/previews.c \
+          core/piece/piece.c \
+          core/tetris/tetris.c \
+          core/tetris/tetris_ui/tetris_ui.c \
+          core/bridge/bridge.c
+
+# 5. 目标文件 (.c -> .o)
+OBJECTS = $(SOURCES:.c=.o)
+
+# 6. 输出文件名
+TARGET = libtetris.so
+
 # ==========================================
-# Build Targets
+# Build Rules
 # ==========================================
-all: shared raylib console
-BRIDGE_SOURCES = $(LOGIC_SOURCES) # Override for shared
-BRIDGE_OBJECTS = $(BRIDGE_SOURCES:.c=.o)
-# 编译共享库的目标文件规则
-shared: SHARED_CFLAGS = $(CFLAGS) -DSHARED_LIB=1
-shared: $(BRIDGE_OBJECTS)
-	@echo "Building Shared Library for Python..."
-	$(CC) $(SHARED_CFLAGS) $(BRIDGE_OBJECTS) -o $(SHARED_LIB) $(SHARED_LDFLAGS)
-	@echo "Done: $(SHARED_LIB)"
-core/tetris/tetris.o: core/tetris/tetris.c
-	$(CC) $(CFLAGS) -DSHARED_LIB=1 -c $< -o $@
-core/bridge/bridge.o: core/bridge/bridge.c
-	$(CC) $(CFLAGS) -DSHARED_LIB=1 -c $< -o $@
-# 2. 编译 Raylib 游戏版本
-raylib:
-	@echo "Building Raylib Game..."
-	$(CC) $(CFLAGS) $(INCLUDE) $(COMMON_SOURCES) -o $(RAYLIB_EXE) $(RAYLIB_LDFLAGS)
-	@echo "Done: $(RAYLIB_EXE)"
-# 3. 编译控制台测试版
-console:
-	@echo "Building Console Test..."
-	$(CC) $(CFLAGS) $(INCLUDE) $(COMMON_SOURCES) -o $(CONSOLE_EXE) -lm
-	@echo "Done: $(CONSOLE_EXE)"
-# 编译通用的 .o 文件规则
+
+all: $(TARGET)
+
+# 链接规则
+$(TARGET): $(OBJECTS)
+	@echo "Linking $(TARGET)..."
+	$(CC) $(CFLAGS) $(OBJECTS) -o $(TARGET) $(LDFLAGS)
+	@echo "Build Complete: $(TARGET)"
+
+# 编译规则 (通用规则，适用于所有 .c 文件)
+# 确保在这里加上 $(INCLUDE)
 %.o: %.c
 	$(CC) $(CFLAGS) $(INCLUDE) -c $< -o $@
-# 清理
+
+# 清理规则
 clean:
-	rm -f $(BRIDGE_OBJECTS) $(SHARED_LIB) $(RAYLIB_EXE) $(CONSOLE_EXE)
-	rm -f core/board/*.o core/game/*.o core/piece/*.o util/*.o ai/*.o core/tetris/*.o core/battle/*.o core/console/*.o core/bridge/*.o
-.PHONY: all shared raylib console clean
+	rm -f $(OBJECTS) $(TARGET)
+
+.PHONY: all clean

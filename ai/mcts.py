@@ -1,194 +1,223 @@
-# ai/mcts.py (adjusted for new model structure)
+# ai/mcts.py
 import math
 import numpy as np
 import torch
 from .utils import TetrisGame
-from . import config # 引入 config 以用 MCTS_C_PUCT
+from . import config
+
 class MCTSNode:
     def __init__(self, parent=None, prior=0):
         self.parent = parent
-        self.children = {} # Map relative_idx (0 to len-1) -> MCTSNode
+        self.children = {}
         self.visit_count = 0
         self.value_sum = 0
-        self.prior = prior # P(s, a) from neural net
+        self.prior = prior
         self.is_expanded = False
-        self.legal_moves = None # 新增: 存储当前状态的 legal_moves
-        self.legal_indices = None # 新增: 存储合法动作的全局索引 (0-79)
+        self.legal_moves = None
+        # 移除 legal_indices（不再需要）
+
     @property
     def value(self):
-        if self.visit_count == 0:
-            return 0
-        return self.value_sum / self.visit_count
-    def ucb_score(self, c_puct=config.MCTS_C_PUCT): # 从 config 取，增强探索
-        u = c_puct * self.prior * math.sqrt(self.parent.visit_count) / (1 + self.visit_count)
+        return 0 if self.visit_count == 0 else self.value_sum / self.visit_count
+
+    def ucb_score(self, parent_sqrt, c_puct=config.MCTS_C_PUCT):
+        # UCB = Q + U
+        u = c_puct * self.prior * parent_sqrt / (1 + self.visit_count)
         return self.value + u
+
 class MCTS:
-    def __init__(self, model, device='cuda', num_simulations=50):
-        self.model = model
+    def __init__(self, model, device='cuda', num_simulations=50, batch_size=8):
+        self.model = model.to(device)
         self.device = device
         self.num_simulations = num_simulations
+        self.batch_size = batch_size
         self.model.eval()
+
+    def _expand_node(self, node, game):
+        """
+        扩展节点：获取合法动作，并使用神经网络预测先验概率(Prior)。
+        """
+        board, ctx = game.get_state()
+      
+        # 获取合法动作 (Numpy array: [N, 5])
+        node.legal_moves = game.get_legal_moves()
+        num_legal = len(node.legal_moves)
+        if num_legal == 0:
+            node.is_expanded = True
+            return
+      
+        # 核心修复: board 来自 [::-1] 切片，存在负步长，PyTorch 不支持。
+        # 必须先 .copy() 变为连续内存。
+        t_board = torch.tensor(board.copy(), dtype=torch.float32, device=self.device).unsqueeze(0)
+        t_ctx = torch.tensor(ctx, dtype=torch.float32, device=self.device).unsqueeze(0)
+        with torch.no_grad():
+            logits, _ = self.model(t_board, t_ctx)
+      
+        logits = logits[0]  # Remove batch dim
+      
+        # Masking: 只保留前 num_legal 个动作的概率，其他设为 -inf
+        mask = torch.full_like(logits, -float('inf'))  # logits 是 256 维
+        mask[:num_legal] = logits[:num_legal]  # 只激活前 num_legal 个
+      
+        # 计算 Softmax
+        probs_t = torch.softmax(mask, dim=0)
+        probs = probs_t[:num_legal].cpu().numpy()  # 只取前 num_legal 个 (其余 prob=0)
+      
+        # 初始化子节点 (key 为 0 到 num_legal-1)
+        node.children = {j: MCTSNode(parent=node, prior=probs[j]) for j in range(num_legal)}
+        node.is_expanded = True
+
     def run(self, game_state: TetrisGame):
         root = MCTSNode()
-       
-        # 1. Expand root immediately
         self._expand_node(root, game_state)
+      
+        # 添加 Dirichlet 噪声到根节点以鼓励探索
         legal_count = len(root.children)
         if legal_count > 0:
             noise = np.random.dirichlet([config.MCTS_DIRICHLET] * legal_count)
             epsilon = config.MCTS_EPSILON
             for i in range(legal_count):
-                child = root.children[i]
-                child.prior = (1 - epsilon) * child.prior + epsilon * noise[i]
-       
-        for _ in range(self.num_simulations):
-            node = root
-            sim_game = game_state.clone()
-           
-            # 2. Selection (Traverse down the tree)
-            path = [node]
-            while node.is_expanded and len(node.children) > 0:
-                # Select child with highest UCB
-                action_idx, node = max(node.children.items(), key=lambda item: item[1].ucb_score())
-                path.append(node)
-               
-                # 新: 从 parent (path[-2]) 的 legal_moves 取 move
-                parent = path[-2]
-                move = parent.legal_moves[action_idx]
-               
-                # 执行 step (现在支持 y)
-                res = sim_game.step(move['x'], move['y'], move['rotation'], move['use_hold'])
-               
-                if res['game_over']:
-                    break
-           
-            # 3. Expansion & Evaluation
-            leaf_value = 0
-            if not res['game_over']:
-                leaf_value = self._expand_node(node, sim_game)
-            else:
-                leaf_value = -1.0 # Penalty for dying
-           
-            # 4. Backup
-            final_val = leaf_value
-            for n in reversed(path):
-                n.visit_count += 1
-                n.value_sum += final_val # 单人游戏，不翻转
-       
+                root.children[i].prior = (1 - epsilon) * root.children[i].prior + epsilon * noise[i]
+      
+        # 模拟循环
+        for sim in range(0, self.num_simulations, self.batch_size):
+            batch_size = min(self.batch_size, self.num_simulations - sim)
+          
+            leaves = []
+            paths = []
+            sim_games = []
+            # 1. Selection & Simulation (到达叶子节点)
+            for _ in range(batch_size):
+                node = root
+                sim_game = game_state.clone()  # Clone C++ state
+                path = [node]
+              
+                # 贪婪选择直到遇到未扩展节点或游戏结束
+                while node.is_expanded and len(node.children) > 0:
+                    parent_sqrt = math.sqrt(node.visit_count)
+                    # Select best child by UCB
+                    action_idx = max(node.children, key=lambda i: node.children[i].ucb_score(parent_sqrt))
+                  
+                    node = node.children[action_idx]
+                    path.append(node)
+                  
+                    # 在模拟环境中执行动作
+                    parent = path[-2]
+                    move = parent.legal_moves[action_idx]  # action_idx 即 local_idx (0..num_legal-1)
+                    # move: [x, y, rot, land, hold]
+                    sim_game.step(move[0], move[1], move[2], move[4])
+                paths.append(path)
+                leaves.append(node)
+                sim_games.append(sim_game)
+          
+            # 2. Evaluation (神经网络推断)
+            if leaves:
+                boards = []
+                ctxs = []
+                terminals = [False] * len(leaves)
+                values = [0.0] * len(leaves)
+                # 收集叶子节点状态
+                for i, (leaf, sim_game) in enumerate(zip(leaves, sim_games)):
+                    # 如果已经在 Selection 阶段判定为终局（之前已扩展但无子节点）
+                    if leaf.is_expanded:
+                        if len(leaf.children) == 0:
+                            terminals[i] = True
+                            values[i] = -1.0  # Loss
+                    else:
+                        # 尚未扩展，获取合法动作检查是否结束
+                        leaf.legal_moves = sim_game.get_legal_moves()
+                        num_legal = len(leaf.legal_moves)
+                        if num_legal == 0:
+                            terminals[i] = True
+                            values[i] = -1.0
+                            leaf.is_expanded = True  # 标记为扩展（死局）
+                        else:
+                            # 准备推断数据
+                            board, ctx = sim_game.get_state()
+                            # 修复: 负步长拷贝
+                            boards.append(torch.tensor(board.copy(), dtype=torch.float32, device=self.device))
+                            ctxs.append(torch.tensor(ctx, dtype=torch.float32, device=self.device))
+              
+                # 批量推断
+                logits_batch = None
+                values_batch = None
+                if boards:
+                    t_boards = torch.stack(boards)
+                    t_ctxs = torch.stack(ctxs)
+                    with torch.no_grad():
+                        logits_batch, values_batch = self.model(t_boards, t_ctxs)
+              
+                # 3. Expansion & Backpropagation
+                batch_idx = 0
+                for i, (leaf, sim_game) in enumerate(zip(leaves, sim_games)):
+                    if terminals[i]:
+                        leaf_value = values[i]
+                    else:
+                        # 使用网络输出扩展节点
+                        logits = logits_batch[batch_idx]
+                        value = values_batch[batch_idx].item()
+                      
+                        num_legal = len(leaf.legal_moves)
+                        mask = torch.full_like(logits, -float('inf'))  # 256 维
+                        mask[:num_legal] = logits[:num_legal]
+                        probs_t = torch.softmax(mask, dim=0)
+                        probs = probs_t[:num_legal].cpu().numpy()
+                        leaf.children = {j: MCTSNode(parent=leaf, prior=probs[j]) for j in range(num_legal)}
+                        leaf.is_expanded = True
+                      
+                        leaf_value = value
+                        batch_idx += 1
+                  
+                    # 反向传播
+                    # 注意：通常 Value Network 输出是对当前局面的估值 (-1输, 1赢)
+                    # 如果当前是 P1 的回合，这个 Value 是对 P1 有利的程度。
+                    # MCTS 路径上的节点交替? 单人 Tetris 不需要 Negamax 翻转，直接加和即可。
+                    final_val = leaf_value
+                    for n in reversed(paths[i]):
+                        n.visit_count += 1
+                        n.value_sum += final_val
+          
+            # 及时释放 C++ 内存，防止内存泄漏
+            for g in sim_games:
+                g.close()
+      
         return root
-    def _expand_node(self, node, game):
-        if node.is_expanded:
-            return 0
-       
-        board, ctx = game.get_state()
-       
-        # 获取合法动作
-        legal_moves = game.get_legal_moves()
-        node.legal_moves = legal_moves # 存储在节点
-       
-        num_legal = len(legal_moves)
-        if num_legal == 0:
-            node.is_expanded = True
-            return 0
-       
-        # 计算 logits 和 value
-        t_board = torch.tensor(board, dtype=torch.float32, device=self.device).unsqueeze(0)
-        t_ctx = torch.tensor(ctx, dtype=torch.float32, device=self.device).unsqueeze(0)
-       
-        with torch.no_grad():
-            logits, value = self.model(t_board, t_ctx)
-       
-        logits = logits[0] # [80]
-       
-        # Masking: 只对合法 idx 取 logit
-        mask = torch.full_like(logits, -float('inf'))
-        legal_indices = []
-        for move in legal_moves:
-            base_idx = move['x'] * 4 + move['rotation']
-            idx = base_idx + 40 if move['use_hold'] else base_idx
-            legal_indices.append(idx)
-            mask[idx] = logits[idx]
-       
-        probs_t = torch.softmax(mask, dim=0).cpu().numpy()
-       
-        # 提取 probs 只为 legal_moves
-        probs = np.zeros(num_legal)
-        for i, idx in enumerate(legal_indices):
-            probs[i] = probs_t[idx]
-       
-        # 创建 children，用 0 to num_legal-1 作为 key
-        node.children = {}
-        for i in range(num_legal):
-            child = MCTSNode(parent=node, prior=probs[i])
-            node.children[i] = child
-       
-        node.legal_indices = legal_indices # 新增: 保存 legal_indices
-       
-        node.is_expanded = True
-        return value.item()
 
     def get_action_probs(self, root, temp=1.0):
-        legal_count = len(root.legal_moves) if root.legal_moves else 0
-        counts = np.zeros(legal_count)
+        """
+        根据根节点的访问次数计算动作概率分布
+        """
+        legal_count = len(root.legal_moves) if root.legal_moves is not None else 0
+        counts = torch.zeros(legal_count)
+      
         for i in range(legal_count):
             if i in root.children:
                 counts[i] = root.children[i].visit_count
-    
+      
         if temp == 0:
+            # 贪婪模式 (Argmax)
             if legal_count == 0:
-                probs = np.zeros(legal_count)
+                probs = torch.zeros(legal_count)
             else:
-                max_count = np.max(counts)
-                best_idxs = np.flatnonzero(counts == max_count) # 处理 ties
-                if len(best_idxs) == 0: # 全 0，fallback uniform
-                    probs = np.ones(legal_count) / legal_count
+                max_count = torch.max(counts)
+                best_idxs = torch.nonzero(counts == max_count).flatten()
+                if len(best_idxs) == 0:
+                    probs = torch.ones(legal_count) / legal_count
                 else:
-                    best_idx = np.random.choice(best_idxs)
-                    probs = np.zeros(legal_count)
+                    best_idx = best_idxs[torch.randint(0, len(best_idxs), (1,))]
+                    probs = torch.zeros(legal_count)
                     probs[best_idx] = 1.0
         else:
+            # 温度采样
             counts = counts ** (1.0 / temp)
-            sum_counts = np.sum(counts)
+            sum_counts = torch.sum(counts)
             if sum_counts > 0:
                 probs = counts / sum_counts
-            else: # 全 0，fallback uniform
-                probs = np.ones(legal_count) / legal_count if legal_count > 0 else np.zeros(legal_count)
-    
-        # 强制归一化，确保 sum=1 (处理浮点精度或遗漏情况)
-        if legal_count > 0:
-            sum_p = np.sum(probs)
-            if sum_p > 0:
-                probs /= sum_p # 修正轻微偏差
             else:
-                probs = np.ones(legal_count) / legal_count # 强制 uniform
-    
-        # 投影到固定 80 维向量，非法动作概率=0
-        full_probs = np.zeros(80)
-        if root.legal_indices is not None:
-            for i in range(legal_count):
-                idx = root.legal_indices[i]
-                full_probs[idx] = probs[i]
-    
-        # 始终规范化 full_probs 以确保 sum == 1.0 精确
-        sum_full = np.sum(full_probs)
-        has_nan = np.any(np.isnan(full_probs))
-        if has_nan:
-            full_probs[np.isnan(full_probs)] = 0
-            sum_full = np.sum(full_probs)
-        if sum_full == 0 and legal_count > 0:
-            uniform_p = 1.0 / legal_count
-            full_probs = np.zeros(80)
-            for i in range(legal_count):
-                idx = root.legal_indices[i]
-                full_probs[idx] = uniform_p
-            sum_full = np.sum(full_probs)
-        if sum_full > 0:
-            full_probs /= sum_full
-    
-        # 新增: 检查无效 probs (NaN 或 sum !=1)，如果仍有问题，打印但已处理
-        sum_full_after = np.sum(full_probs)
-        has_nan_after = np.any(np.isnan(full_probs))
-        if has_nan_after or not np.isclose(sum_full_after, 1.0, rtol=1e-8):
-            print(f"[DEBUG] Post-normalization invalid! sum={sum_full_after}, has_nan={has_nan_after}, legal_count={legal_count}.")
-    
-        return full_probs # (80,)
+                probs = torch.ones(legal_count) / legal_count if legal_count > 0 else torch.zeros(legal_count)
+      
+        # 归一化
+        if legal_count > 0 and probs.sum() > 0:
+            probs /= probs.sum()
+      
+        return probs.numpy()  # 直接返回 legal_count 维的 probs (不再是 80/256 维 full_probs)

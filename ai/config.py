@@ -1,29 +1,28 @@
-# ai/config.py (小改：加 MCTS_C_PUCT=2.0 增强探索)
+# ai/config.py
 import torch
 import os
 # --- 训练超参数 ---
-BATCH_SIZE = 128
-LR = 0.005
-MEMORY_SIZE = 100000 # 经验池大小
-gamma = 0.99 # 折扣因子 (如未来引入)
+BATCH_SIZE = 64  # 初始稳定
+LR = 0.003
+MEMORY_SIZE = 20000  # 增大以积累多样经验
+GAMMA = 0.99  # 略高，鼓励长远生存和B2B链
 # --- MCTS 配置 ---
-MCTS_SIMS_TRAIN = 1200 # 训练时的搜索次数 (追求速度)
-MCTS_SIMS_EVAL = 800 # 观看/评估时的搜索次数 (追求质量) ↑ 更好 eval
-MCTS_DIRICHLET = 0.3
-MCTS_EPSILON = 0.25
-
-NUM_WORKERS = 10 # mp_train 的进程数 (建议 CPU核心数 - 2)
-MCTS_C_PUCT = 3.5 # 新: UCB 常数，更大=更探索 (原1.0)
+MCTS_SIMS_TRAIN = 100  # 起始低，加速初始迭代；后期增
+MCTS_SIMS_EVAL = 800
+MCTS_DIRICHLET = 0.4
+MCTS_EPSILON = 0.3
+NUM_WORKERS = 10
+MCTS_C_PUCT = 3.5
+TAU_INIT = 1.0  # 初始温度高，鼓励探索
+TAU_DECAY = 0.995
 # --- 游戏限制 ---
-MAX_STEPS_TRAIN = 1000 # 训练时每局最大步数 (防止死循环)
-MAX_STEPS_EVAL = 50000 # 观看时几乎不限制步数
+MAX_STEPS_TRAIN = 3000  # 增大鼓励生存训练
+MAX_STEPS_EVAL = 50000
 # --- 路径配置 ---
 CHECKPOINT_FILE = "tetris_checkpoint.pth"
 MEMORY_FILE = "tetris_memory.pkl"
-BACKUP_DIR = "backups" # 备份文件夹路径
+BACKUP_DIR = "backups"
 # --- 设备 ---
 DEVICE = 'cuda' if torch.cuda.is_available() else 'cpu'
-# --- 确保备份文件夹存在 ---
 if not os.path.exists(BACKUP_DIR):
     os.makedirs(BACKUP_DIR)
-

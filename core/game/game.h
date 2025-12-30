@@ -1,11 +1,14 @@
 // core/game/game.h
 #ifndef GAME_H
 #define GAME_H
+
 #include "../../util/util.h"
 #include "../piece/piece.h"
 #include "../board/board.h"
 #include "previews/previews.h"
 #include "bag/bag.h"
+
+// ... (AttackType 枚举保持不变) ...
 typedef enum {
     ATK_NONE,
     ATK_SINGLE, ATK_DOUBLE, ATK_TRIPLE, ATK_TETRIS,
@@ -18,68 +21,80 @@ typedef enum {
     ATK_LSS, ATK_LSD, ATK_LST,
     ATK_ERROR,
 } AttackType;
+
 typedef struct {
     int preview_count;
-    Bool is_hold_enabled;
+    bool is_hold_enabled; // 使用 bool (stdbool.h) 替代 Bool，除非你有特殊定义
     unsigned int seed;
 } GameConfig;
+
 typedef struct {
     Bag bag;
     Previews previews;
    
     Piece hold_piece;
-    Bool has_hold_piece;
-    Bool can_hold_piece;
+    bool has_hold_piece;
+    bool can_hold_piece;
+
+    uint32_t rng_state; 
    
-    int is_last_rotate; // 0: none, 1-5: normal kicks, for 180 separate but unified
-    Bool is_last_clear_line;
-    int ren; // Combo count
+    int8_t is_last_rotate; // 优化：int8_t (0-5)
+    bool is_last_clear_line;
+    int ren; 
 } GameState;
-// 主游戏对象
-// 优化：单一大对象，内存连续
+
 typedef struct {
     GameConfig config;
     GameState state;
-    Board board;
+    Board board;          // 嵌入结构体，内存连续
     Piece current_piece;
-    Bool is_game_over; // 新增：方便快速判断游戏结束
+    bool is_game_over;
 } Game;
+
 // --- API ---
-// 初始化游戏 (只进行一次 malloc)
 Game* game_init(const GameConfig* config);
-// 释放游戏
 void game_free(Game* game);
-// 极速复制游戏 (用于 AI 推演)
-// 由于内存连续，这等同于 memcpy
 Game* game_copy(const Game* src);
-// 核心逻辑
-Bool game_try_move(Game* game, MoveAction action);
-Bool game_try_rotate(Game* game, RotationAction action);
-Bool game_hold_piece(Game* game);
-// 推进游戏进程 (锁定 -> 消行 -> 生成下一个)
-// 返回 TRUE 表示游戏结束
-Bool game_next_step(Game* game);
+
+bool game_try_move(Game* game, MoveAction action);
+bool game_try_rotate(Game* game, RotationAction action);
+bool game_hold_piece(Game* game);
+bool game_next_step(Game* game);
+
 // 辅助查询
-int game_get_shadow_height(const Game* game); // 此时不需要修改 game，加 const
-AttackType game_get_attack_type(const Game* game); // 需要根据当前状态判断
-Bool game_is_perfect_clear(const Game* game);
+int game_get_shadow_height(const Game* game);
+AttackType game_get_attack_type(const Game* game);
+bool game_is_perfect_clear(const Game* game);
 
+// --- 内联核心逻辑优化 ---
 
-static void place_piece(Board* board, const Piece* p) {
+// 优化：使用位运算直接放置，循环减少到 4 次
+static inline void place_piece(Board* board, const Piece* p) {
     uint16_t mask = piece_get_mask(p);
-    for (int dy = 0; dy < 4; dy++) {
-        for (int dx = 0; dx < 4; dx++) {
-            if (mask & (1u << (15 - (dy * 4 + dx)))) {
-                int bx = p->x + dx;
-                int by = p->y - dy;
-                if (bx >= 0 && bx < board->width && by >= 0 && by < board->height) {
-                    board_set_cell(board, bx, by, 1);
+    
+    // 遍历方块的 4 行
+    for (int r = 0; r < 4; r++) {
+        // 提取方块当前行的数据 (4 bits)
+        // mask 存储格式：行0在高位 (Bits 15-12)
+        uint16_t row_data = (mask >> ((3 - r) * 4)) & 0xF;
+        
+        if (row_data) {
+            int y = p->pos[1] - r;
+            // 确保 Y 在合法范围内
+            if (y >= 0 && y < BOARD_HEIGHT) {
+                // 将方块行数据位移到棋盘对应 X 位置
+                // 注意：如果 x < 0，需要特殊处理位移
+                if (p->pos[0] >= 0) {
+                    board->rows[y] |= (row_data << p->pos[0]);
+                } else {
+                    board->rows[y] |= (row_data >> (-p->pos[0]));
                 }
             }
         }
     }
 }
-int clear_rows(Board* board);
-Bool board_piece_overlaps(const Board* board, const Piece* p);
+
+// 声明 Board 相关的扩展函数 (实现在 game.c)
+bool board_piece_overlaps(const Board* board, const Piece* p);
 
 #endif
