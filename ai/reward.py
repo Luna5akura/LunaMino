@@ -23,23 +23,34 @@ def calculate_heuristics(board_state):
 
 def get_reward(step_result, current_metrics, prev_metrics, is_training=True):
     reward = 0.0
+    
+    # 1. 基础消行奖励（可以适当调低，让位给消洞）
     lines = step_result['lines_cleared']
-    if lines > 0:
-        print(f'\n\nLINESLINESLINESLINESLINES: {lines=}\n\n')
-        base = [0,40,100,300,1200][lines]  # NES
-        reward += base + 300 * lines
-        reward += step_result.get('combo', 0) * 100
-    reward += current_metrics['near_clears'] * 10  # 新: shaping近清奖
-    reward -= current_metrics['holes'] * 0.05
-    reward -= current_metrics['bumpiness'] * 0.01
-    hole_delta = current_metrics['holes'] - prev_metrics.get('holes', 0)
-    if hole_delta > 0: reward -= hole_delta * 1  # 弱罚
-    else: reward += abs(hole_delta) * 30  # 强奖减holes
-    mh = current_metrics['max_height']
-    reward -= (mh / 20.0) * 0.5  # 弱
-    if step_result['game_over']: reward -= 300
-    force_game_over = False
-    if is_training and (current_metrics['holes'] > 80 or mh > 19):  # 放宽
-        force_game_over = True
-        reward -= 30
-    return reward, force_game_over
+    line_rewards = [0, 10, 30, 80, 200] # 调低基础分，让AI不只是为了消行而消行
+    reward += line_rewards[lines]
+    
+    # 2. 空洞惩罚（核心）
+    curr_holes = current_metrics['holes']
+    prev_holes = prev_metrics.get('holes', 0)
+    
+    # 静态惩罚：只要有洞，每一步都扣分（促使AI尽快消洞）
+    reward -= curr_holes * 2.0 
+    
+    # 动态奖励：消灭一个洞给高分
+    hole_delta = curr_holes - prev_holes
+    if hole_delta < 0:
+        # 消洞了！给予重奖
+        reward += abs(hole_delta) * 50.0 
+    elif hole_delta > 0:
+        # 造洞了！严厉处罚
+        reward -= hole_delta * 80.0
+        
+    # 3. 覆盖空洞惩罚 (防止在空洞上方堆叠)
+    # 如果空洞上方的格子被填满了，惩罚增加
+    reward -= current_metrics['agg_height'] * 0.1
+    
+    # 4. 死亡惩罚
+    if step_result['game_over']:
+        reward -= 500
+        
+    return reward, False

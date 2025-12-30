@@ -1,5 +1,4 @@
 // core/tetris/bridge.c
-
 #include "bridge.h"
 #include <raylib.h>
 #include "../tetris/tetris_ui/tetris_ui.h" // for vis
@@ -45,31 +44,21 @@ static void run_bfs_for_current_piece(Game* game, int use_hold, LegalMoves* out_
         p->x = node.x;
         p->y = node.y;
         p->rotation = node.rotation;
-        // drop to ghost
-        int ghost_y = p->y;
-        int drop_count = 0;
-        while (drop_count < 40 && !board_piece_overlaps(&game->board, p)) {
-            p->y--;
-            drop_count++;
-        }
-        p->y++; // back one
-        ghost_y = p->y;
-        p->y = node.y;
-        // check duplicate
-        Bool exists = false;
-        for (int i = 0; i < count; i++) {
-            if (out_moves->moves[i].x == node.x && out_moves->moves[i].y == ghost_y && out_moves->moves[i].rotation == node.rotation && out_moves->moves[i].use_hold == use_hold) {
-                exists = true;
-                break;
+        // check if at bottom
+        int save_y = p->y;
+        Bool can_down = game_try_move(game, MOVE_DOWN);
+        if (can_down) {
+            p->y = save_y; // undo
+        } else {
+            // at bottom, add the move
+            if (count < MAX_LEGAL_MOVES) {
+                out_moves->moves[count].x = node.x;
+                out_moves->moves[count].y = node.y;
+                out_moves->moves[count].rotation = node.rotation;
+                out_moves->moves[count].use_hold = use_hold;
+                out_moves->moves[count].landing_height = game_get_shadow_height(game);
+                count++;
             }
-        }
-        if (!exists && count < MAX_LEGAL_MOVES) {
-            out_moves->moves[count].x = node.x;
-            out_moves->moves[count].y = ghost_y;
-            out_moves->moves[count].rotation = node.rotation;
-            out_moves->moves[count].use_hold = use_hold;
-            out_moves->moves[count].landing_height = game_get_shadow_height(game); // or calculate
-            count++;
         }
         // actions
         for (int action = 0; action < 5; action++) {
@@ -165,9 +154,9 @@ StepResult ai_step(Tetris* tetris, int x, int y, int rotation, int use_hold) {
     Piece* p = &game->current_piece;
     p->rotation = rotation % 4;
     p->x = x;
-    p->y = y; 
+    p->y = y;
     if (board_piece_overlaps(&game->board, p)) {
-        result.is_game_over = true; 
+        result.is_game_over = true;
         return result;
     }
     place_piece(&game->board, p);
@@ -215,7 +204,7 @@ StepResult ai_step(Tetris* tetris, int x, int y, int rotation, int use_hold) {
     return result;
 }
 void ai_receive_garbage(Tetris* tetris, int lines) {
-    tetris_receive_garbage_line(tetris, lines);  // 修改为直接添加垃圾行
+    tetris_receive_garbage_line(tetris, lines); // 修改为直接添加垃圾行
 }
 static UIConfig* ai_ui_config = NULL;
 void ai_enable_visualization(Tetris* tetris) {

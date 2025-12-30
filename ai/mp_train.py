@@ -133,7 +133,7 @@ def worker_process(rank, shared_model, data_queue, device):
             next_board, _ = game.get_state()
             cur_metrics = calculate_heuristics(next_board)
             step_reward, force_over = get_reward(res, cur_metrics, prev_metrics, is_training=True)
-            print(f"[Worker {rank}] Step {steps}: Reward {step_reward:.2f}, Lines {res['lines_cleared']}, Holes  {cur_metrics['holes']}")
+            print(f"[Worker {rank}] Step {steps}: Reward {step_reward:.2f}, Lines {res['lines_cleared']}, Holes {cur_metrics['holes']}")
             if force_over:
                 res['game_over'] = True
             monitor.update("score", step_reward, 'sum')
