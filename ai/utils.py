@@ -10,24 +10,25 @@ import weakref
 # ==========================================
 LIB_PATH = os.path.join(os.path.dirname(__file__), "../libtetris.so")
 if not os.path.exists(LIB_PATH):
-    raise FileNotFoundError(f"Shared library not found at: {LIB_PATH}")
+    # 尝试当前目录，方便调试
+    LIB_PATH = os.path.join(os.path.dirname(__file__), "libtetris.so")
+    if not os.path.exists(LIB_PATH):
+        raise FileNotFoundError(f"Shared library not found at: {LIB_PATH}")
 
 lib = ctypes.CDLL(LIB_PATH)
 
 # ==========================================
-# 2. CTypes 结构体定义 (严格匹配 C 头文件)
+# 2. CTypes 结构体定义
 # ==========================================
-MAX_LEGAL_MOVES = 256  # 必须匹配 bridge.h
+MAX_LEGAL_MOVES = 256
 
 class MacroAction(ctypes.Structure):
-    # 【修复】移除 _pack_ = 1，让 ctypes 自动匹配 C 编译器的默认对齐
-    # _pack_ = 1  <-- 删除这行
     _fields_ = [
         ("x", ctypes.c_int8),
         ("y", ctypes.c_int8),
         ("rotation", ctypes.c_int8),
         ("landing_height", ctypes.c_int8),
-        ("use_hold", ctypes.c_bool) 
+        ("use_hold", ctypes.c_bool)
     ]
 
 class LegalMoves(ctypes.Structure):
@@ -41,14 +42,13 @@ class StepResult(ctypes.Structure):
         ("lines_cleared", ctypes.c_int),
         ("damage_sent", ctypes.c_int),
         ("attack_type", ctypes.c_int),
-        ("is_game_over", ctypes.c_bool), # 修正：必须对应 C 的 bool (1 byte)
-        # C 编译器通常会在这里自动插入 3 bytes padding 以对齐下面的 int
+        ("is_game_over", ctypes.c_bool),
         ("b2b_count", ctypes.c_int),
         ("combo_count", ctypes.c_int)
     ]
 
 # ==========================================
-# 3. 函数原型定义 (明确类型以防 Segfault)
+# 3. 函数原型定义
 # ==========================================
 lib.create_tetris.argtypes = [ctypes.c_int]
 lib.create_tetris.restype = ctypes.c_void_p
@@ -64,10 +64,10 @@ lib.ai_reset_game.argtypes = [ctypes.c_void_p, ctypes.c_int]
 # Pointers for buffers
 lib.ai_get_state.argtypes = [
     ctypes.c_void_p,
-    ctypes.POINTER(ctypes.c_int), # board (200)
-    ctypes.POINTER(ctypes.c_int), # queue (5)
-    ctypes.POINTER(ctypes.c_int), # hold (1)
-    ctypes.POINTER(ctypes.c_int)  # meta (5) - 修正大小
+    ctypes.POINTER(ctypes.c_int),  # board (200)
+    ctypes.POINTER(ctypes.c_int),  # queue (5)
+    ctypes.POINTER(ctypes.c_int),  # hold (1)
+    ctypes.POINTER(ctypes.c_int)   # meta (5)
 ]
 
 lib.ai_get_legal_moves.argtypes = [ctypes.c_void_p, ctypes.POINTER(LegalMoves)]
@@ -77,20 +77,27 @@ lib.ai_step.restype = StepResult
 
 lib.ai_receive_garbage.argtypes = [ctypes.c_void_p, ctypes.c_int]
 
-# Visualization
 lib.ai_enable_visualization.argtypes = [ctypes.c_void_p]
 lib.ai_render.argtypes = [ctypes.c_void_p]
 lib.ai_close_visualization.argtypes = []
+
 
 # ==========================================
 # 4. 高性能 Python 封装
 # ==========================================
 class TetrisGame:
+
+    __slots__ = (
+
+        '__weakref__',  # <--- 必须添加这一项才能使用 weakref.finalize
+        'ptr', '_rendered', '_board_buf', '_board_ptr', 
+        '_queue_buf', '_queue_ptr', '_hold_buf', '_hold_ptr', 
+        '_meta_buf', '_meta_ptr', '_moves_struct', '_context_buf',
+        'np_board', 'np_queue', 'np_hold', 'np_meta', 
+        '_moves_np_view', '_struct_size'
+    )
+
     def __init__(self, seed=0, ptr=None):
-        """
-        :param seed: 随机种子
-        :param ptr: 如果不为None，接管现有的C指针（用于clone）
-        """
         if ptr:
             self.ptr = ptr
         else:
@@ -98,10 +105,9 @@ class TetrisGame:
             if not self.ptr:
                 raise RuntimeError("Failed to create Tetris instance")
         
-        # 资源管理标志
         self._rendered = False
         
-        # --- 性能优化：预分配内存缓冲区 ---
+        # --- Buffer Allocation ---
         # Board: 10x20 = 200 ints
         self._board_buf = (ctypes.c_int * 200)()
         self._board_ptr = ctypes.cast(self._board_buf, ctypes.POINTER(ctypes.c_int))
@@ -114,34 +120,36 @@ class TetrisGame:
         self._hold_buf = (ctypes.c_int * 1)()
         self._hold_ptr = ctypes.cast(self._hold_buf, ctypes.POINTER(ctypes.c_int))
         
-        # Meta: 5 ints (b2b, combo, can_hold, cur_piece, pending_garbage)
+        # Meta: 5 ints
         self._meta_buf = (ctypes.c_int * 5)()
         self._meta_ptr = ctypes.cast(self._meta_buf, ctypes.POINTER(ctypes.c_int))
         
-        # Legal Moves 结构体复用
+        # Legal Moves Struct
         self._moves_struct = LegalMoves()
-
-        # --- 性能优化：Numpy 零拷贝视图 (Zero-copy Views) ---
-        # 这些数组直接指向 ctypes 缓冲区的内存地址。
-        # 当调用 C 函数填充 buffer 后，这些 numpy 数组会自动“看到”新数据，无需复制。
+        
+        # Context numpy buffer (pre-allocated)
+        self._context_buf = np.zeros(11, dtype=np.int32)
+        
+        # --- Zero-copy Views (Standard) ---
+        # 注意：这里 [::-1] 创建了一个负步长的视图，这在 PyTorch 转换时通常需要 copy()
         self.np_board = np.ctypeslib.as_array(self._board_buf).reshape(20, 10)[::-1]
         
+        # 使用 int32 视图，方便快速索引
         self.np_queue = np.ctypeslib.as_array(self._queue_buf)
-        self.np_hold  = np.ctypeslib.as_array(self._hold_buf)
-        self.np_meta  = np.ctypeslib.as_array(self._meta_buf)
+        self.np_hold = np.ctypeslib.as_array(self._hold_buf)
+        self.np_meta = np.ctypeslib.as_array(self._meta_buf)
+        
+        # --- Optimization: Persistent Moves View ---
+        # 计算结构体实际大小（包含 padding）
+        self._struct_size = ctypes.sizeof(MacroAction)
+        # 直接基于 buffer 创建一个大的 numpy 视图，避免每次调用 create_buffer
+        # shape: (256, struct_size_in_bytes) -> 视作 int8 字节流
+        self._moves_np_view = np.frombuffer(self._moves_struct.moves, dtype=np.int8).reshape(MAX_LEGAL_MOVES, self._struct_size)
+        
+        weakref.finalize(self, self._cleanup)
 
-    def __enter__(self):
-        return self
-
-    def __exit__(self, exc_type, exc_val, exc_tb):
-        self.close()
-
-    def __del__(self):
-        # 安全的析构函数：不引用全局 lib，防止解释器退出时报错
-        self.close()
-
-    def close(self):
-        if hasattr(self, 'ptr') and self.ptr:
+    def _cleanup(self):
+        if self.ptr:
             if self._rendered:
                 try:
                     lib.ai_close_visualization()
@@ -155,96 +163,88 @@ class TetrisGame:
                 pass
             self.ptr = None
 
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        self._cleanup()
+
     def clone(self):
-        """创建当前游戏状态的副本"""
         new_ptr = lib.clone_tetris(self.ptr)
+        # 注意：这里会重新分配 Python 侧的 Buffer，这是必须的，因为每个 Game 实例需要独立的 Buffer
         return TetrisGame(ptr=new_ptr)
 
     def reset(self, seed=0):
-        """重置游戏"""
         lib.ai_reset_game(self.ptr, seed)
 
     def get_state(self):
         """
         获取游戏状态。
-        :return: (board_array, meta_array)
+        :return: (board_view, context_array)
+        警告: board_view 是底层 C 内存的视图。如果需要保存历史状态，调用者必须进行 .copy()。
         """
-        # 1. 调用 C 填充缓冲区
         lib.ai_get_state(
-            self.ptr, 
-            self._board_ptr, 
-            self._queue_ptr, 
-            self._hold_ptr, 
+            self.ptr,
+            self._board_ptr,
+            self._queue_ptr,
+            self._hold_ptr,
             self._meta_ptr
         )
         
-        # 2. 组装 Context
-        # Meta Indices: 0:b2b, 1:combo, 2:can_hold, 3:cur_piece, 4:pending_garbage
+        # Optimization: 使用 NumPy 数组索引而非 Ctypes 属性访问
+        # Ctypes access (e.g. self._meta_buf[3]) creates a Python int object.
+        # Numpy access (e.g. self.np_meta[3]) reads directly from memory (faster).
         
-        current_piece = self._meta_buf[3]
+        # Context Mapping:
+        # 0: current_piece (meta[3])
+        # 1: hold (hold[0])
+        # 2-6: queue[0-4]
+        # 7: b2b (meta[0])
+        # 8: combo (meta[1])
+        # 9: can_hold (meta[2])
+        # 10: pending_garbage (meta[4])
         
-        # --- 核心修复：确保拼接后的长度为 11 ---
-        # 之前的版本只有 10 个 (1+1+5+3)
-        # 现在加上 pending_garbage (1) -> 总共 11
-        context = np.concatenate([
-            [current_piece],       # 1
-            self.np_hold,          # 1
-            self.np_queue,         # 5
-            self.np_meta[:3],      # 3 (b2b, combo, can_hold)
-            [self.np_meta[4]]      # 1 (pending_garbage) <--- 这一项必须加上
-        ])
+        self._context_buf[0] = self.np_meta[3]
+        self._context_buf[1] = self.np_hold[0]
+        self._context_buf[2:7] = self.np_queue[:]
+        self._context_buf[7:10] = self.np_meta[:3]
+        self._context_buf[10] = self.np_meta[4]
         
-        # 此时 len(context) 应为 11
-        
-        return self.np_board, context
+        return self.np_board, self._context_buf
 
     def get_legal_moves(self):
         """
-        获取合法动作。
-        :return: Numpy 数组 shape (N, 5) -> [x, y, rotation, landing_height, use_hold]
+        :return: Copy of legal moves array (N, 5).
         """
         lib.ai_get_legal_moves(self.ptr, ctypes.byref(self._moves_struct))
         
         count = self._moves_struct.count
-        # print(f'\n\n COUNT {count=}\n\n')
         if count == 0:
             return np.empty((0, 5), dtype=np.int8)
-
-        # 【修复】使用 ctypes 迭代读取，确保内存对齐正确
-        # 虽然比 np.frombuffer 慢一点点，但能避免读取到 struct padding 垃圾值
-        moves = self._moves_struct.moves
-        result = np.zeros((count, 5), dtype=np.int8)
-        
-        for i in range(count):
-            m = moves[i]
-            result[i, 0] = m.x
-            result[i, 1] = m.y
-            result[i, 2] = m.rotation
-            result[i, 3] = m.landing_height
-            result[i, 4] = int(m.use_hold)
-        
-        return result
+            
+        # Optimization: 直接切片预创建的 numpy 视图，然后 copy
+        # 必须 copy，因为 _moves_struct 内存会在下一次 get_legal_moves 时被覆盖
+        # 取前 5 个字节 (x, y, rot, land, hold)
+        return self._moves_np_view[:count, :5].copy()
 
     def step(self, x, y, rotation, use_hold):
         """
-        执行一步。
-        :return: (lines, sent, game_over, combo) 元组，比 dict 快
+        :return: (lines, sent, attack_type, game_over, combo)
         """
-
+        # ctypes call overhead is dominant here, hard to optimize further without C changes
         res = lib.ai_step(self.ptr, x, y, rotation, use_hold)
         
         return (
             res.lines_cleared,
             res.damage_sent,
             res.attack_type,
-            bool(res.is_game_over),
+            res.is_game_over, # bool
             res.combo_count
         )
 
     def receive_garbage(self, lines):
         lib.ai_receive_garbage(self.ptr, lines)
 
-    # --- Visualization ---
     def enable_render(self):
         lib.ai_enable_visualization(self.ptr)
         self._rendered = True

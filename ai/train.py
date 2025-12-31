@@ -1,4 +1,5 @@
 # ai/train.py
+
 import torch
 import torch.nn.functional as F
 import torch.optim as optim
@@ -7,222 +8,358 @@ import random
 import os
 import pickle
 import time
-from collections import deque
+import gc
+from torch.amp import autocast, GradScaler
 from .utils import TetrisGame
 from .model import TetrisPolicyValue
 from .mcts import MCTS
 from .reward import get_reward, calculate_heuristics
 from . import config
 
+# ==========================================
+# 1. 高效的 Numpy Replay Buffer
+# ==========================================
+class NumpyReplayBuffer:
+    def __init__(self, capacity, board_shape=(20, 10), ctx_dim=11, action_dim=256):
+        self.capacity = capacity
+        self.ptr = 0
+        self.size = 0
+        
+        # 使用 int8 存储 Board，节省 75% 内存 (Tetris Board 只有 0 或 1-N，int8 足够)
+        self.boards = np.zeros((capacity, *board_shape), dtype=np.int8)
+        self.ctxs = np.zeros((capacity, ctx_dim), dtype=np.float32)
+        self.probs = np.zeros((capacity, action_dim), dtype=np.float32)
+        # Value 是一维的
+        self.values = np.zeros((capacity, 1), dtype=np.float32)
+
+    def add_batch(self, data):
+        """
+        一次性添加一局游戏的数据。
+        data: list of [board, ctx, probs, value]
+        """
+        if not data:
+            return
+            
+        # 解包数据 (利用 zip(*data) 快速转置)
+        # boards: tuple of (20, 10) arrays
+        boards, ctxs, probs, values = zip(*data)
+        
+        n = len(boards)
+        
+        # 计算写入索引（支持循环覆盖）
+        indices = np.arange(self.ptr, self.ptr + n) % self.capacity
+        
+        # 批量写入 Numpy 数组 (比 list append 快得多)
+        # 注意：这里会自动将 int32/float 的 board 转换为 int8 存储
+        self.boards[indices] = np.array(boards, dtype=np.int8)
+        self.ctxs[indices] = np.array(ctxs, dtype=np.float32)
+        self.probs[indices] = np.array(probs, dtype=np.float32)
+        self.values[indices] = np.array(values, dtype=np.float32).reshape(-1, 1)
+        
+        self.ptr = (self.ptr + n) % self.capacity
+        self.size = min(self.size + n, self.capacity)
+
+    def sample(self, batch_size):
+        # O(1) 随机采样
+        idxs = np.random.randint(0, self.size, size=batch_size)
+        
+        # 返回数据 (board 转回 float32 供 Tensor 使用)
+        return (
+            self.boards[idxs].astype(np.float32), 
+            self.ctxs[idxs], 
+            self.probs[idxs], 
+            self.values[idxs]
+        )
+
+    def save(self, filepath):
+        with open(filepath, 'wb') as f:
+            # 只保存有效数据部分，减少磁盘占用
+            pickle.dump({
+                'boards': self.boards[:self.size],
+                'ctxs': self.ctxs[:self.size],
+                'probs': self.probs[:self.size],
+                'values': self.values[:self.size],
+                'ptr': self.ptr,
+                'size': self.size
+            }, f)
+
+    def load(self, filepath):
+        try:
+            with open(filepath, 'rb') as f:
+                data = pickle.load(f)
+                # 如果容量不匹配，需要截断或填充，这里假设匹配
+                sz = data['size']
+                self.boards[:sz] = data['boards']
+                self.ctxs[:sz] = data['ctxs']
+                self.probs[:sz] = data['probs']
+                self.values[:sz] = data['values']
+                self.ptr = data['ptr']
+                self.size = sz
+                print(f"[Buffer] Loaded {sz} samples.")
+        except Exception as e:
+            print(f"[Buffer] Load failed: {e}")
+
+# ==========================================
+# 2. 优化后的 Battle Simulation
+# ==========================================
 def normalize_score(score):
-    return np.tanh(score / 100.0)
+    return np.tanh((score + config.TANH_OFFSET) / config.TANH_SCALER)
 
-def battle_simulation(net, mcts_sims, render=False):
-    print("[Simulation] Starting simulation, render=", render)
-    with TetrisGame() as game:
-        garbage_lines = random.randint(1, 2)
-        game.receive_garbage(garbage_lines)
-        game.receive_garbage(garbage_lines)
-        print(f"[Simulation] Added {garbage_lines} garbage lines at start.")
+def battle_simulation(game, mcts, render=False):
+    """
+    game: 复用的 TetrisGame 实例
+    mcts: 复用的 MCTS 实例
+    """
+    # 重置游戏状态 (C++ 内部重置，不涉及 Python 对象销毁)
+    game.reset(random.randint(0, 1000000))
+    
+    # 如果需要渲染
+    if render:
+        game.enable_render()
+    
+    training_data = []
+    steps = 0
+    pieces_placed = 0
+    total_score = 0.0
+    total_lines = 0
+    tetris_count = 0
+    
+    # 统计数据复用
+    episode_stats = {
+        'pieces_since_last_garbage': 0,
+        'total_garbage_cleared': 0,
+        'garbage_clear_events': 0,
+        'pieces_used_for_garbage': 0
+    }
+    
+    # 获取初始状态 (Views)
+    board_view, prev_ctx_view = game.get_state()
+    # 必须 Copy，因为我们要把这个状态存入 training_data，且后续 step 会修改底层内存
+    board = board_view.copy()
+    prev_ctx = prev_ctx_view.copy()
+    
+    prev_metrics = calculate_heuristics(board)
+    
+    while True:
         if render:
-            game.enable_render()
-        mcts = MCTS(net, device=config.DEVICE, num_simulations=mcts_sims)
-
-        training_data = []
-        steps = 0
-        total_score = 0.0
-        total_lines = 0
-        tetris_count = 0
-        reward_sum_clear = 0.0
-        count_clear = 0
-        reward_sum_normal = 0.0
-        count_normal = 0
-        hole_sum = 0
-
-        episode_stats = {
-            'pieces_since_last_garbage': 0,
-            'total_garbage_cleared': 0,
-            'garbage_clear_events': 0,
-            'pieces_used_for_garbage': 0
+            game.render()
+            time.sleep(0.05) # 稍微快一点
+        
+        # MCTS 运行 (复用 Buffer)
+        root = mcts.run(game)
+        
+        # 获取策略
+        temp = 1.0 if steps < 30 else 0.5
+        action_probs = mcts.get_action_probs(root, temp=temp)
+        
+        # 收集数据 [Board, Ctx, Probs, Value_Placeholder]
+        # 注意：这里存入的是已经 copy 过的 board
+        training_data.append([board, prev_ctx, action_probs, None])
+        
+        # 采样动作
+        legal = game.get_legal_moves()
+        if len(legal) == 0:
+            break
+            
+        action_idx = np.random.choice(len(action_probs), p=action_probs)
+        move = root.legal_moves[action_idx]
+        
+        # 执行
+        episode_stats['pieces_since_last_garbage'] += 1
+        res = game.step(move[0], move[1], move[2], move[4])
+        
+        pieces_placed += 1
+        # if pieces_placed % 5 == 0 and not res[3]:
+        #     # 随机添加垃圾行
+        #     garbage = random.randint(1, 4)
+        #     game.receive_garbage(garbage)
+            
+        # 获取新状态
+        next_board_view, next_ctx_view = game.get_state()
+        next_board = next_board_view.copy()
+        next_ctx = next_ctx_view.copy()
+        
+        cur_metrics = calculate_heuristics(next_board)
+        
+        step_result = {
+            'lines_cleared': res[0],
+            'damage_sent': res[1],
+            'attack_type': res[2],
+            'game_over': res[3],
+            'combo': res[4]
         }
+        
+        step_reward, force_over = get_reward(
+            step_result, cur_metrics, prev_metrics, steps,
+            context=next_ctx, prev_context=prev_ctx,
+            episode_stats=episode_stats, is_training=True
+        )
+        
+        total_score += step_reward
+        total_lines += step_result['lines_cleared']
+        if step_result['lines_cleared'] == 4:
+            tetris_count += 1
+            
+        steps += 1
+        
+        # 滚动状态
+        board = next_board
+        prev_ctx = next_ctx
+        prev_metrics = cur_metrics
+        
+        if step_result['game_over'] or force_over or steps > config.MAX_STEPS_TRAIN:
+            break
+            
+    # 回溯 Value
+    final_value = normalize_score(total_score)
+    for item in training_data:
+        item[3] = final_value
+        
+    stats = {
+        "score": total_score,
+        "steps": steps,
+        "lines": total_lines,
+        "tetrises": tetris_count
+    }
+    
+    return training_data, stats
 
-        board, prev_ctx = game.get_state()
-        # 修复 1: 确保 board 内存连续，防止后续 Tensor 转换报错
-        board = board.copy()
-        prev_metrics = calculate_heuristics(board)
-        while True:
-            if render:
-                game.render()
-
-            root = mcts.run(game)
-            temp = 1.0 if steps < 30 else 0.5
-            action_probs = mcts.get_action_probs(root, temp=temp)
-
-            # 存储当前状态（注意 copy）
-            s_board, s_ctx = game.get_state()
-            training_data.append([s_board.copy(), s_ctx, action_probs, None])
-
-            legal = game.get_legal_moves()
-            if len(legal) == 0:
-                break  # 死局
-
-            # choose action
-            local_idx = np.random.choice(256, p=action_probs)
-            move = legal[local_idx]
-
-            # ——IMPORTANT: 每放一个块，计数 +1（用于挖掘效率统计）
-            episode_stats['pieces_since_last_garbage'] += 1
-
-            # 执行动作
-            res = game.step(move[0], move[1], move[2], move[4])
-
-            if render:
-                game.render()
-
-            # 获取下一状态与 ctx（必须拿到 ctx）
-            next_board, next_ctx = game.get_state()
-            cur_metrics = calculate_heuristics(next_board)
-
-            # step_result 仍然按你代码适配
-            step_result = {
-                'lines_cleared': res[0],
-                'damage_sent': res[1],
-                'attack_type': res[2],
-                'game_over': res[3],
-                'combo': res[4]
-            }
-
-            # 传入 prev_ctx, next_ctx, episode_stats
-            step_reward, force_over = get_reward(step_result, cur_metrics, prev_metrics, steps,
-                                                context=next_ctx, prev_context=prev_ctx,
-                                                episode_stats=episode_stats, is_training=True)
-
-            if force_over:
-                step_result['game_over'] = True
-
-            total_score += step_reward
-            steps += 1
-            hole_sum += cur_metrics['holes']
-
-            if step_result['lines_cleared'] > 0:
-                total_lines += step_result['lines_cleared']
-                reward_sum_clear += step_reward
-                count_clear += 1
-                if step_result['lines_cleared'] == 4:
-                    tetris_count += 1
-            else:
-                reward_sum_normal += step_reward
-                count_normal += 1
-
-            if steps % 10 == 0:
-                print(f"[Step {steps}] Reward: {step_reward:.2f}, Lines: {step_result['lines_cleared']}, Holes: {cur_metrics['holes']}, Max Height: {cur_metrics['max_height']}")
-
-
-            prev_metrics = cur_metrics
-            prev_ctx = next_ctx  # 更新 prev_ctx
-
-            if step_result['game_over'] or steps > config.MAX_STEPS_TRAIN:
-                break
-
-        final_value = normalize_score(total_score)
-        for item in training_data:
-            item[3] = final_value
-
-        stats = {
-            "score": total_score,
-            "steps": steps,
-            "lines": total_lines,
-            "tetrises": tetris_count,
-            "avg_holes": hole_sum / steps if steps > 0 else 0,
-            "max_height": cur_metrics['max_height'],
-            "avg_r_normal": reward_sum_normal / count_normal if count_normal > 0 else 0,
-            "avg_r_clear": reward_sum_clear / count_clear if count_clear > 0 else 0
-        }
-
-        if episode_stats['garbage_clear_events'] > 0:
-            avg_pieces = episode_stats['pieces_used_for_garbage'] / episode_stats['garbage_clear_events']
-        else:
-            avg_pieces = float('inf')  # 没有挖掘事件
-
-        print(f"[Digging Summary] total_garbage_cleared={episode_stats['total_garbage_cleared']}, "
-            f"garbage_events={episode_stats['garbage_clear_events']}, "
-            f"avg_pieces_per_garbage={avg_pieces:.2f}")
-
-        print(f"[Simulation End] Score: {stats['score']:.2f}, Steps: {stats['steps']}, Lines: {stats['lines']}, Tetrises: {stats['tetrises']}")
-        print(f" Avg Holes: {stats['avg_holes']:.2f}, Max Height: {stats['max_height']}, Avg Reward Normal: {stats['avg_r_normal']:.2f}, Clear: {stats['avg_r_clear']:.2f}")
-
-        return training_data, stats
-
-
-
-def save_checkpoint(net, optimizer, memory, game_idx):
+# ==========================================
+# 3. 优化后的主训练循环
+# ==========================================
+def save_checkpoint(net, optimizer, buffer, game_idx):
     print(f"[Saving] Checkpoint at game {game_idx}")
     torch.save({
         'model_state_dict': net.state_dict(),
         'optimizer_state_dict': optimizer.state_dict(),
         'game_idx': game_idx
     }, config.CHECKPOINT_FILE)
-    with open(config.MEMORY_FILE, 'wb') as f:
-        pickle.dump(list(memory), f)
+    
+    # Buffer 单独保存
+    if buffer.size > 0:
+        buffer.save(config.MEMORY_FILE)
     print("[Saving] Done.")
 
-def load_checkpoint(net, optimizer):
+def load_checkpoint(net, optimizer, buffer):
     start_idx = 0
-    memory = deque(maxlen=config.MEMORY_SIZE)
     if os.path.exists(config.CHECKPOINT_FILE):
         print("[Loading] Checkpoint found.")
         checkpoint = torch.load(config.CHECKPOINT_FILE, map_location=config.DEVICE)
         net.load_state_dict(checkpoint['model_state_dict'])
         optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
         start_idx = checkpoint['game_idx']
+        
     if os.path.exists(config.MEMORY_FILE):
-        with open(config.MEMORY_FILE, 'rb') as f:
-            memory.extend(pickle.load(f))
-        print(f"[Loading] Memory loaded: {len(memory)} items.")
-    return start_idx, memory
+        buffer.load(config.MEMORY_FILE)
+            
+    return start_idx
 
 def train():
+    torch.backends.cudnn.benchmark = True
+    
     net = TetrisPolicyValue().to(config.DEVICE)
+    # 启用 channels_last 内存布局加速卷积
+    net = net.to(memory_format=torch.channels_last)
+    
     optimizer = optim.Adam(net.parameters(), lr=config.LR)
-    game_idx, memory = load_checkpoint(net, optimizer)
-
-    print(f"[Train] Starting single-process training on {config.DEVICE}. Render enabled.")
-    render = True
-
+    scaler = GradScaler()
+    
+    # 初始化高效 Buffer
+    buffer = NumpyReplayBuffer(config.MEMORY_SIZE)
+    
+    game_idx = load_checkpoint(net, optimizer, buffer)
+    
+    print(f"[Train] Optimized Single-process training on {config.DEVICE}.")
+    
+    # --- 关键优化：复用对象 ---
+    # 1. 复用 TetrisGame 实例 (避免 ctypes 重复 init)
+    game_instance = TetrisGame()
+    
+    # 2. 复用 MCTS 实例 (避免 CUDA tensor 重复 alloc)
+    # MCTS 内部会持有 model 的引用
+    mcts_instance = MCTS(net, device=config.DEVICE, num_simulations=config.MCTS_SIMS_TRAIN)
+    
+    RENDER_INTERVAL = 20 
+    
     try:
         while True:
-            sims = config.MCTS_SIMS_TRAIN if not render else config.MCTS_SIMS_EVAL
-            new_data, stats = battle_simulation(net, mcts_sims=sims, render=render)
-
-            memory.extend(new_data)
+            render = (game_idx % RENDER_INTERVAL == 0)
+            
+            # 动态调整模拟次数
+            current_sims = config.MCTS_SIMS_EVAL if render else config.MCTS_SIMS_TRAIN
+            mcts_instance.num_simulations = current_sims
+            
+            # 1. 生成数据 (传入复用的对象)
+            # mcts.run() 会自动调用 model.eval()
+            new_data, stats = battle_simulation(game_instance, mcts_instance, render=render)
+            
+            # 批量存入 Buffer
+            buffer.add_batch(new_data)
             game_idx += 1
-
-            print(f"[Game {game_idx}] Summary - Score: {stats['score']:.2f} | Steps: {stats['steps']} | Lines: {stats['lines']} | Tetrises: {stats['tetrises']}")
-            print(f" Avg Holes: {stats['avg_holes']:.2f} | Max Height: {stats['max_height']} | Avg R Normal: {stats['avg_r_normal']:.2f} | Clear: {stats['avg_r_clear']:.2f}")
-
-            if len(memory) < config.BATCH_SIZE:
+            
+            if buffer.size < config.BATCH_SIZE:
                 continue
+            
+            # 2. 训练阶段
+            new_samples = len(new_data)
+            # 动态训练步数：每生成 BATCH_SIZE 数据，训练 2-3 次
+            train_steps = max(1, int(new_samples / config.BATCH_SIZE * 5.0))
+            train_steps = min(train_steps, 20)
+            
+            if buffer.size < 2000:
+                train_steps = 1
 
-            batch = random.sample(memory, config.BATCH_SIZE)
-            b_board = torch.stack([torch.tensor(x[0], dtype=torch.float32) for x in batch]).to(config.DEVICE)
-            b_ctx = torch.stack([torch.tensor(x[1], dtype=torch.float32) for x in batch]).to(config.DEVICE)
-            b_policy = torch.stack([torch.tensor(x[2], dtype=torch.float32) for x in batch]).to(config.DEVICE)
-            b_value = torch.tensor([x[3] for x in batch], dtype=torch.float32).unsqueeze(1).to(config.DEVICE)
+            total_loss = 0
+            
+            # 显式切换到训练模式 (启用 BN update / Dropout)
+            net.train()
+            
+            for _ in range(train_steps):
+                # 极速采样：直接从 Numpy Array 切片，无需 stack
+                b_board_np, b_ctx_np, b_policy_np, b_value_np = buffer.sample(config.BATCH_SIZE)
+                
+                # 转换为 Tensor
+                b_board = torch.from_numpy(b_board_np).to(config.DEVICE, non_blocking=True)
+                b_ctx = torch.from_numpy(b_ctx_np).to(config.DEVICE, non_blocking=True)
+                b_policy = torch.from_numpy(b_policy_np).to(config.DEVICE, non_blocking=True)
+                b_value = torch.from_numpy(b_value_np).to(config.DEVICE, non_blocking=True)
 
-            optimizer.zero_grad()
-            p, v = net(b_board, b_ctx)
-            loss = -torch.sum(b_policy * F.log_softmax(p, dim=1), dim=1).mean() + F.mse_loss(v, b_value)
-            loss.backward()
-            optimizer.step()
+                # 确保输入是 channels_last 格式
+                if b_board.dim() == 3:
+                    b_board = b_board.unsqueeze(1)
+                b_board = b_board.contiguous(memory_format=torch.channels_last)
 
-            print(f"[Train] Loss: {loss.item():.4f}")
+                optimizer.zero_grad()
+                
+                with autocast(device_type='cuda'):
+                    p, v = net(b_board, b_ctx)
+                    
+                    policy_loss = -torch.sum(b_policy * F.log_softmax(p, dim=1), dim=1).mean()
+                    value_loss = F.mse_loss(v, b_value)
+                    entropy = -torch.mean(torch.sum(F.softmax(p, dim=1) * F.log_softmax(p, dim=1), dim=1))
+                    
+                    loss = policy_loss + value_loss - 0.01 * entropy
+                
+                scaler.scale(loss).backward()
+                scaler.step(optimizer)
 
-            if game_idx % 20 == 0:
-                save_checkpoint(net, optimizer, memory, game_idx)
-
+                scaler.update()
+                
+                total_loss += loss.item()
+            
+            # 训练结束，打印日志
+            if game_idx % 10 == 0:
+                avg_loss = total_loss / train_steps if train_steps > 0 else 0
+                print(f"[Train] Game {game_idx} | Score {stats['score']:.0f} | Steps {stats['steps']} | Loss {avg_loss:.4f} | Buf {buffer.size}")
+            
+            # 定期保存
+            if game_idx % 50 == 0:
+                save_checkpoint(net, optimizer, buffer, game_idx)
+                gc.collect() 
+                
     except KeyboardInterrupt:
         print("[Interrupt] Saving final checkpoint.")
-        save_checkpoint(net, optimizer, memory, game_idx)
+        save_checkpoint(net, optimizer, buffer, game_idx)
 
 if __name__ == "__main__":
     train()
