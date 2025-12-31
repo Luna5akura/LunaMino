@@ -39,11 +39,17 @@ def battle_simulation(net, mcts_sims, render=False):
         count_normal = 0
         hole_sum = 0
 
-        board, ctx = game.get_state()
+        episode_stats = {
+            'pieces_since_last_garbage': 0,
+            'total_garbage_cleared': 0,
+            'garbage_clear_events': 0,
+            'pieces_used_for_garbage': 0
+        }
+
+        board, prev_ctx = game.get_state()
         # 修复 1: 确保 board 内存连续，防止后续 Tensor 转换报错
         board = board.copy()
         prev_metrics = calculate_heuristics(board)
-
         while True:
             if render:
                 game.render()
@@ -51,34 +57,46 @@ def battle_simulation(net, mcts_sims, render=False):
             root = mcts.run(game)
             temp = 1.0 if steps < 30 else 0.5
             action_probs = mcts.get_action_probs(root, temp=temp)
-            # 获取当前状态用于存储
+
+            # 存储当前状态（注意 copy）
             s_board, s_ctx = game.get_state()
             training_data.append([s_board.copy(), s_ctx, action_probs, None])
+
             legal = game.get_legal_moves()
             if len(legal) == 0:
                 break  # 死局
-            local_idx = np.random.choice(len(action_probs), p=action_probs)  # 直接 choice len(legal_count)
-            move = legal[local_idx]  # 直接用 local_idx
 
-            # 修复 2: game.step 返回的是字典
+            # choose action
+            local_idx = np.random.choice(256, p=action_probs)
+            move = legal[local_idx]
+
+            # ——IMPORTANT: 每放一个块，计数 +1（用于挖掘效率统计）
+            episode_stats['pieces_since_last_garbage'] += 1
+
+            # 执行动作
             res = game.step(move[0], move[1], move[2], move[4])
-            
+
             if render:
                 game.render()
 
-            next_board, _ = game.get_state()
+            # 获取下一状态与 ctx（必须拿到 ctx）
+            next_board, next_ctx = game.get_state()
             cur_metrics = calculate_heuristics(next_board)
 
-            # 修复 2: 适配字典返回值
+            # step_result 仍然按你代码适配
             step_result = {
-                    'lines_cleared': res[0],
+                'lines_cleared': res[0],
                 'damage_sent': res[1],
                 'attack_type': res[2],
                 'game_over': res[3],
                 'combo': res[4]
             }
 
-            step_reward, force_over = get_reward(step_result, cur_metrics, prev_metrics, steps, is_training=True)
+            # 传入 prev_ctx, next_ctx, episode_stats
+            step_reward, force_over = get_reward(step_result, cur_metrics, prev_metrics, steps,
+                                                context=next_ctx, prev_context=prev_ctx,
+                                                episode_stats=episode_stats, is_training=True)
+
             if force_over:
                 step_result['game_over'] = True
 
@@ -99,7 +117,9 @@ def battle_simulation(net, mcts_sims, render=False):
             if steps % 10 == 0:
                 print(f"[Step {steps}] Reward: {step_reward:.2f}, Lines: {step_result['lines_cleared']}, Holes: {cur_metrics['holes']}, Max Height: {cur_metrics['max_height']}")
 
+
             prev_metrics = cur_metrics
+            prev_ctx = next_ctx  # 更新 prev_ctx
 
             if step_result['game_over'] or steps > config.MAX_STEPS_TRAIN:
                 break
@@ -118,6 +138,15 @@ def battle_simulation(net, mcts_sims, render=False):
             "avg_r_normal": reward_sum_normal / count_normal if count_normal > 0 else 0,
             "avg_r_clear": reward_sum_clear / count_clear if count_clear > 0 else 0
         }
+
+        if episode_stats['garbage_clear_events'] > 0:
+            avg_pieces = episode_stats['pieces_used_for_garbage'] / episode_stats['garbage_clear_events']
+        else:
+            avg_pieces = float('inf')  # 没有挖掘事件
+
+        print(f"[Digging Summary] total_garbage_cleared={episode_stats['total_garbage_cleared']}, "
+            f"garbage_events={episode_stats['garbage_clear_events']}, "
+            f"avg_pieces_per_garbage={avg_pieces:.2f}")
 
         print(f"[Simulation End] Score: {stats['score']:.2f}, Steps: {stats['steps']}, Lines: {stats['lines']}, Tetrises: {stats['tetrises']}")
         print(f" Avg Holes: {stats['avg_holes']:.2f}, Max Height: {stats['max_height']}, Avg Reward Normal: {stats['avg_r_normal']:.2f}, Clear: {stats['avg_r_clear']:.2f}")

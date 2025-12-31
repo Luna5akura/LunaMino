@@ -61,7 +61,7 @@ class MCTS:
       
         # 计算 Softmax
         probs_t = torch.softmax(mask, dim=0)
-        probs = probs_t[:num_legal].cpu().numpy()  # 只取前 num_legal 个 (其余 prob=0)
+        probs = probs_t.cpu().numpy()  # 只取前 num_legal 个 (其余 prob=0)
       
         # 初始化子节点 (key 为 0 到 num_legal-1)
         node.children = {j: MCTSNode(parent=node, prior=probs[j]) for j in range(num_legal)}
@@ -188,7 +188,7 @@ class MCTS:
         根据根节点的访问次数计算动作概率分布
         """
         legal_count = len(root.legal_moves) if root.legal_moves is not None else 0
-        counts = torch.zeros(legal_count)
+        counts = torch.zeros(256)  # 修改：固定256维
       
         for i in range(legal_count):
             if i in root.children:
@@ -197,27 +197,27 @@ class MCTS:
         if temp == 0:
             # 贪婪模式 (Argmax)
             if legal_count == 0:
-                probs = torch.zeros(legal_count)
+                probs = torch.zeros(256)
             else:
-                max_count = torch.max(counts)
-                best_idxs = torch.nonzero(counts == max_count).flatten()
+                max_count = torch.max(counts[:legal_count])  # 只看前legal_count
+                best_idxs = torch.nonzero(counts[:legal_count] == max_count).flatten()
                 if len(best_idxs) == 0:
-                    probs = torch.ones(legal_count) / legal_count
+                    probs = torch.ones(256) / 256
                 else:
                     best_idx = best_idxs[torch.randint(0, len(best_idxs), (1,))]
-                    probs = torch.zeros(legal_count)
+                    probs = torch.zeros(256)
                     probs[best_idx] = 1.0
         else:
-            # 温度采样
+            # 温度采样 (整个counts，非法=0)
             counts = counts ** (1.0 / temp)
             sum_counts = torch.sum(counts)
             if sum_counts > 0:
                 probs = counts / sum_counts
             else:
-                probs = torch.ones(legal_count) / legal_count if legal_count > 0 else torch.zeros(legal_count)
-      
-        # 归一化
-        if legal_count > 0 and probs.sum() > 0:
+                probs = torch.ones(256) / 256
+
+        # 归一化 (已确保 sum>0 或 uniform)
+        if probs.sum() > 0:
             probs /= probs.sum()
-      
-        return probs.numpy()  # 直接返回 legal_count 维的 probs (不再是 80/256 维 full_probs)
+
+        return probs.numpy()  # 固定256维

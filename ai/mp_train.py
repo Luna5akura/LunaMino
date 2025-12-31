@@ -40,7 +40,7 @@ class StatsMonitor:
                 result[k] = v
         return result
 def worker_process(rank, shared_model, data_queue, device):
-    print(f"[Worker {rank}] Starting on {device}")
+    # print(f"[Worker {rank}] Starting on {device}")
     seed = rank + int(time.time())
     torch.manual_seed(seed)
     np.random.seed(seed)
@@ -67,11 +67,19 @@ def worker_process(rank, shared_model, data_queue, device):
         garbage_lines = random.randint(1, 2)
         game.receive_garbage(garbage_lines)
         game.receive_garbage(garbage_lines)
-        print(f"[Worker {rank}] Added {garbage_lines} garbage lines at start.")
+        # print(f"[Worker {rank}] Added {garbage_lines} garbage lines at start.")
         monitor = StatsMonitor()
         steps = 0
         game_data = []
-        board, ctx = game.get_state()
+        episode_stats = {
+            'pieces_since_last_garbage': 0,
+            'total_garbage_cleared': 0,
+            'garbage_clear_events': 0,
+            'pieces_used_for_garbage': 0
+        }
+
+        # 获取初始 state
+        board, prev_ctx = game.get_state()
         prev_metrics = calculate_heuristics(board)
        
         while True:
@@ -87,11 +95,12 @@ def worker_process(rank, shared_model, data_queue, device):
             # 获取状态并 COPY，防止 Tensor 负步长错误
             board, ctx = game.get_state()
             game_data.append([board.copy(), ctx, action_probs, None])
-            local_idx = np.random.choice(len(action_probs), p=action_probs)
+            local_idx = np.random.choice(256, p=action_probs)
            
             move = legal[local_idx]
            
-            # 修复 2: step 返回字典
+            episode_stats['pieces_since_last_garbage'] += 1
+
             res = game.step(move[0], move[1], move[2], move[4])
             if steps % 10 == 0:
                 print(f"[Worker {rank} Step {steps}] Lines: {res[0]}, Game Over: {res[3]}, Combo: {res[4]}")
@@ -101,7 +110,7 @@ def worker_process(rank, shared_model, data_queue, device):
                 pps = 100 / elapsed if elapsed > 0 else 0
                 monitor.update("pps", pps, 'set')
                 start_time = time.time()
-            next_board, _ = game.get_state()
+            next_board, next_ctx = game.get_state()
             cur_metrics = calculate_heuristics(next_board)
             step_result = {
                 'lines_cleared': res[0],
@@ -110,7 +119,10 @@ def worker_process(rank, shared_model, data_queue, device):
                 'game_over': res[3],
                 'combo': res[4]
             }
-            step_reward, force_over = get_reward(step_result, cur_metrics, prev_metrics, steps, is_training=True)
+
+            step_reward, force_over = get_reward(step_result, cur_metrics, prev_metrics, steps,
+                                             context=next_ctx, prev_context=prev_ctx,
+                                             episode_stats=episode_stats, is_training=True)
             if force_over:
                 step_result['game_over'] = True
             # 减少日志频率
@@ -129,12 +141,23 @@ def worker_process(rank, shared_model, data_queue, device):
             if step_result['lines_cleared'] == 4:
                 monitor.update("tetrises", 1, 'sum')
             prev_metrics = cur_metrics
+            prev_ctx = next_ctx
             steps += 1
             if step_result['game_over'] or steps > config.MAX_STEPS_TRAIN:
                 break
         monitor.update("steps", steps, 'set')
         stats = monitor.get_summary()
-        final_val = np.tanh(stats['score'] / 100.0)
+        clear_rate = stats['lines'] / steps if steps > 0 else 0
+        end_reason = 'Game Over' if step_result['game_over'] else 'Max Steps' if steps > config.MAX_STEPS_TRAIN else 'Force Over'
+        if episode_stats['garbage_clear_events'] > 0:
+            avg_pieces = episode_stats['pieces_used_for_garbage'] / episode_stats['garbage_clear_events']
+        else:
+            avg_pieces = float('inf')
+
+        print(f"[Worker {rank} DiggingSummary] total_garbage_cleared={episode_stats['total_garbage_cleared']}, "
+            f"events={episode_stats['garbage_clear_events']}, avg_pieces_per_garbage={avg_pieces:.2f}")
+        print(f"[Worker {rank} End] Score: {stats['score']:.2f}, Lines: {stats['lines']:.2f}, Steps: {steps}, Clear Rate: {clear_rate:.3f}, Avg Holes: {stats['holes_step']:.2f}, End: {end_reason}")
+        final_val = np.tanh(stats['score'] / 50.0)  # 修改
         for item in game_data:
             item[3] = final_val
         data_queue.put((game_data, stats))
@@ -153,6 +176,7 @@ def save_memory_safe(memory, filename):
         print(f"[Error] Save memory failed: {e}")
         if os.path.exists(temp_name):
             os.remove(temp_name)
+
 def train_manager():
     mp.set_start_method('spawn', force=True)
     backup_dir = config.BACKUP_DIR
@@ -210,12 +234,16 @@ def train_manager():
             if received_packets > 0:
                 memory.extend(new_data)
                 if game_cnt % 20 == 0:
-                    avg = {k: np.mean(v) if len(v) > 0 else 0 for k, v in history.items()}
-                    print("\n" + "-" * 75)
-                    print(f"[Epoch {game_cnt}] Mem: {len(memory)} | Dev: {config.DEVICE}")
-                    print(f" Score: {avg['score']:6.2f} | Steps: {avg['steps']:5.1f} | Lines: {avg['lines']:.2f}")
-                    print(f" Holes/Step: {avg['holes_step']:6.2f} | MaxHt: {avg['max_height']:5.1f} | Tetrises: {avg['tetrises']:.2f}")
-                    print("-" * 75 + "\n")
+                        avg = {k: np.mean(v) if len(v) > 0 else 0 for k, v in history.items()}
+                        print("\n" + "-" * 75)
+                        print(f"[Epoch {game_cnt}] Mem: {len(memory)} | Dev: {config.DEVICE}")
+                        print(f" Score: {avg['score']:6.2f} | Steps: {avg['steps']:5.1f} | Lines: {avg['lines']:.2f}")
+                        print(f" Holes/Step: {avg['holes_step']:6.2f} | MaxHt: {avg['max_height']:5.1f} | Tetrises: {avg['tetrises']:.2f}")
+                        if avg['lines'] < 1.0 or avg['clear_rate'] < 0.05:
+                            print("[Warning] Low clears - Tune reward/c_puct or increase sims")
+                        if avg['steps'] < 100:
+                            print("[Warning] Short games - Strengthen survival bonus or reduce force_over")
+                        print("-" * 75 + "\n")
                 if len(memory) >= config.BATCH_SIZE:
                     batch = random.sample(memory, config.BATCH_SIZE)
                     b_board = torch.stack([torch.tensor(x[0], dtype=torch.float32) for x in batch]).to(config.DEVICE)
