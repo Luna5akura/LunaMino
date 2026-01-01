@@ -73,7 +73,7 @@ def fast_simulate_move(game_ptr, move, w_holes, w_height, w_bump, w_lines):
         lib.destroy_tetris(sim_ptr)
 
 class WarmupBuffer:
-    def __init__(self, capacity, board_shape=(20, 10), ctx_dim=11, action_dim=256):
+    def __init__(self, capacity, board_shape=(20, 10), ctx_dim=11, action_dim=config.ACTION_DIM):
         self.capacity = capacity
         self.ptr = 0
         self.size = 0
@@ -158,7 +158,7 @@ def run_warmup():
     # 预分配临时存储，避免循环内 malloc
     tmp_boards = np.zeros((MAX_STEPS_PER_GAME, 20, 10), dtype=np.int8)
     tmp_ctxs = np.zeros((MAX_STEPS_PER_GAME, 11), dtype=np.float32)
-    tmp_probs = np.zeros((MAX_STEPS_PER_GAME, 256), dtype=np.float32)
+    tmp_probs = np.zeros((MAX_STEPS_PER_GAME, config.ACTION_DIM), dtype=np.float32)
     
     total_score_sum = 0
     
@@ -200,8 +200,9 @@ def run_warmup():
             cur_metrics = calculate_heuristics(next_board)
             
             step_result = {
-                'lines_cleared': res[0], 'game_over': res[3], 'combo': res[4]
+                'lines_cleared': res[0], 'game_over': res[3], 'b2b_count': res[4], 'combo': res[5]
             }
+            # print(res,step_result)
             r, _ = get_reward(step_result, cur_metrics, prev_metrics, steps)
             game_score += r
             
@@ -209,10 +210,10 @@ def run_warmup():
             curr_ctx = next_ctx
             prev_metrics = cur_metrics
             steps += 1
+            if steps % 5 == 0: game.receive_garbage(1) 
             
             if res[3]:
                 break
-        if steps % 6 == 0: game.receive_garbage(1) 
         # Save to buffer
         if steps > 0:
             final_value = np.tanh(game_score / config.TANH_SCALER)

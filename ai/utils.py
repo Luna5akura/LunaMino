@@ -4,6 +4,7 @@ import ctypes
 import os
 import numpy as np
 import weakref
+from . import config  # 引入配置
 
 # ==========================================
 # 1. 库加载与配置
@@ -227,6 +228,50 @@ class TetrisGame:
         # 取前 5 个字节 (x, y, rot, land, hold)
         return self._moves_np_view[:count, :5].copy()
 
+    def get_legal_moves_with_ids(self):
+        """
+        返回:
+        1. moves: 原始动作数据 (N, 5) -> [x, y, rot, land_h, hold]
+        2. action_ids: 对应的全局唯一 Action ID (N,)
+        """
+        moves = self.get_legal_moves() # (N, 5)
+        if len(moves) == 0:
+            return moves, np.array([], dtype=np.int64)
+
+        # 提取各分量
+        # moves 结构: 0:x, 1:y(not used for id), 2:rot, 3:landing_height, 4:hold
+        # 注意：这里我们使用 column 3 (landing_height) 而不是 column 1 (current y)
+        xs = moves[:, 0].astype(np.int64)
+        rots = moves[:, 2].astype(np.int64)
+        land_ys = moves[:, 3].astype(np.int64)
+        holds = moves[:, 4].astype(np.int64)
+
+        # === 核心：生成包含 Y 信息的唯一 ID ===
+        # 1. 限制范围 (Clamping) 防止越界崩溃
+        # X 范围 [-2, 9] -> 映射到 [0, 11]
+        xs_idx = np.clip(xs + config.OFFSET_X, 0, config.GRID_WIDTH_X - 1)
+        
+        # Y 范围 [0, 23] -> 映射到 [0, 23]
+        ys_idx = np.clip(land_ys, 0, config.GRID_HEIGHT_Y - 1)
+        
+        # 计算 ID
+        # 层次结构: Hold -> Rot -> X -> Y
+        # Stride Y = 1
+        # Stride X = 24
+        # Stride Rot = 24 * 12 = 288
+        # Stride Hold = 24 * 12 * 4 = 1152
+        
+        stride_x = config.GRID_HEIGHT_Y
+        stride_rot = config.GRID_WIDTH_X * config.GRID_HEIGHT_Y
+        stride_hold = config.GRID_WIDTH_X * config.GRID_HEIGHT_Y * 4
+        
+        action_ids = (holds * stride_hold) + \
+                     (rots * stride_rot) + \
+                     (xs_idx * stride_x) + \
+                     (ys_idx)
+                     
+        return moves, action_ids
+
     def step(self, x, y, rotation, use_hold):
         """
         :return: (lines, sent, attack_type, game_over, combo)
@@ -239,6 +284,7 @@ class TetrisGame:
             res.damage_sent,
             res.attack_type,
             res.is_game_over, # bool
+            res.b2b_count,
             res.combo_count
         )
 

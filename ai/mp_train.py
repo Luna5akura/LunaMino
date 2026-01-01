@@ -46,7 +46,7 @@ os.environ['MKL_NUM_THREADS'] = '1'
 # 2. 高效 Numpy Replay Buffer (内嵌定义以保持独立性)
 # ==========================================
 class NumpyReplayBuffer:
-    def __init__(self, capacity, board_shape=(20, 10), ctx_dim=11, action_dim=256):
+    def __init__(self, capacity, board_shape=(20, 10), ctx_dim=11, action_dim=config.ACTION_DIM):
         self.capacity = capacity
         self.ptr = 0
         self.size = 0
@@ -143,6 +143,7 @@ def worker_process(rank, shared_model, data_queue, device):
         # 重置游戏
         game_seed = random.randint(0, 1000000)
         game.reset(game_seed)
+        game.receive_garbage(2)
         
         # 重置统计
         steps = 0
@@ -170,6 +171,19 @@ def worker_process(rank, shared_model, data_queue, device):
             # 获取策略
             temp = 1.0 if steps < 30 else 0.5
             action_probs = mcts.get_action_probs(root, temp=temp)
+
+            action_probs = np.nan_to_num(action_probs, nan=0.0)
+
+            # 2. 重新归一化 (Renormalize)
+            s = np.sum(action_probs)
+            if s < 1e-9:
+                # 如果全是 0，随机选一个合法动作
+                # 但这里我们只有 2304 维的向量，不知道哪些是合法的 mask
+                # 如果发生这种情况，说明 MCTS 彻底失败了，通常不会走到这里
+                # 为了防止 Crash，我们均匀分布
+                action_probs = np.ones_like(action_probs) / len(action_probs)
+            else:
+                action_probs /= s
             
             # --- 优化 2: 立即转换为 int8 存储 ---
             # 大幅减少 Queue 传输负荷
@@ -177,16 +191,38 @@ def worker_process(rank, shared_model, data_queue, device):
             data_ctxs.append(prev_ctx)
             data_probs.append(action_probs)
             
-            # 采样与执行
-            action = np.random.choice(len(action_probs), p=action_probs)
-            move = root.legal_moves[action]
+
+            # 采样动作
+            legal, ids = game.get_legal_moves_with_ids() # 确保这里用的是新接口
+            if len(legal) == 0:
+                break
+    
+            # === 修复：仅在合法动作范围内采样 ===
+            # action_probs 是 2304 维的，直接 choice(2304) 可能会选到非法动作
+            # 应该从 legal moves 中选
+            
+            # 提取当前合法动作对应的概率
+            valid_probs = action_probs[ids]
+            
+            # 再次归一化 Valid Probs (防止精度误差)
+            s_valid = np.sum(valid_probs)
+            if s_valid < 1e-9:
+                valid_probs = np.ones_like(valid_probs) / len(valid_probs)
+            else:
+                valid_probs /= s_valid
+                
+            # 在合法动作的索引 (0, 1, 2...) 中采样
+            action_idx_in_legal = np.random.choice(len(legal), p=valid_probs)
+            
+            # 获取对应的 Move
+            move = legal[action_idx_in_legal]
             
             episode_stats['pieces_since_last_garbage'] += 1
             res = game.step(move[0], move[1], move[2], move[4])
             
             pieces_placed += 1
-            # if pieces_placed % 5 == 0 and not res[3]:
-            #      game.receive_garbage(random.randint(1, 2))
+            if pieces_placed % 5 == 0 and not res[3]:
+                 game.receive_garbage(random.randint(1, 2))
             
             # 状态更新
             next_board_view, next_ctx_view = game.get_state()
@@ -196,7 +232,7 @@ def worker_process(rank, shared_model, data_queue, device):
             
             step_result = {
                 'lines_cleared': res[0], 'damage_sent': res[1],
-                'attack_type': res[2], 'game_over': res[3], 'combo': res[4]
+                'attack_type': res[2], 'game_over': res[3], 'b2b_count': res[4] ,'combo': res[5]
             }
             
             reward, force_over = get_reward(
@@ -220,20 +256,22 @@ def worker_process(rank, shared_model, data_queue, device):
                 break
         
         # --- 打包数据 ---
-        final_value = np.tanh((score_sum + config.TANH_OFFSET)/ config.TANH_SCALER) 
-
+        final_value = np.tanh(score_sum)
         # 转换为 Numpy Array 以便快速传输
         np_boards = np.array(data_boards, dtype=np.int8)
         np_ctxs = np.array(data_ctxs, dtype=np.float32)
         np_probs = np.array(data_probs, dtype=np.float32)
         np_values = np.full((len(data_boards), 1), final_value, dtype=np.float32)
-        
         stats = {
-            'score': score_sum, 'lines': lines_sum, 'steps': steps,
+            'score': score_sum, 
+            'lines': lines_sum, 
+            'steps': steps,
             'holes_step': holes_sum / steps if steps > 0 else 0,
-            'tetrises': tetris_count
+            'tetrises': tetris_count,
+            'avg_holes': holes_sum / steps if steps > 0 else 0,  # Explicitly add for clarity (redundant but illustrative)
+            # Add more if desired, e.g., 'max_height': cur_metrics['max_height'] (from final state)
         }
-        
+       
         # 发送数据
         try:
             # 传输的是紧凑的 Numpy 数组，而非包含大量小对象的 List
@@ -255,8 +293,11 @@ class TrainingDashboard:
         self.log_buffer = []
         self.stats = {
             "game_count": 0, "memory_size": 0, "avg_score": 0.0,
-            "loss": 0.0, "pps": 0.0, "tetrises": 0.0, "train_steps": 0
+            "loss": 0.0, "pps": 0.0, "tetrises": 0.0, "train_steps": 0,
+            "avg_holes": 0.0,  # New: Average holes per step
+            "avg_lines": 0.0,  # New: Average lines cleared per game
         }
+        # ... (existi
         self.start_time = time.time()
 
     def log(self, message):
@@ -285,6 +326,8 @@ class TrainingDashboard:
         t2.add_column("Performance"); t2.add_column("Value")
         t2.add_row("Avg Score", f"{self.stats['avg_score']:.1f}")
         t2.add_row("Tetris Rate", f"{self.stats['tetrises']:.2f}")
+        t2.add_row("Avg Holes/Step", f"{self.stats['avg_holes']:.2f}")  # New row
+        t2.add_row("Avg Lines/Game", f"{self.stats['avg_lines']:.1f}")  # New row
 
         grid.add_row(Panel(t1, title="Training"), Panel(t2, title="Eval (Avg 50)"))
         layout["body"].update(grid)
@@ -340,6 +383,8 @@ def train_manager():
         from collections import deque
         scores_hist = deque(maxlen=50)
         tetris_hist = deque(maxlen=50)
+        holes_hist = deque(maxlen=50)  # New: For average holes per step
+        lines_hist = deque(maxlen=50)  # New: For lines cleared per game
         
         game_cnt = start_idx
         total_train_steps = 0
@@ -358,12 +403,14 @@ def train_manager():
                         
                         scores_hist.append(stats['score'])
                         tetris_hist.append(stats['tetrises'])
+                        holes_hist.append(stats['holes_step'])  # New: Track holes per step
+                        lines_hist.append(stats['lines'])  # New: Track lines per game
                         
                         game_cnt += 1
                         processed_games += 1
                         
                         if game_cnt % 10 == 0:
-                            dashboard.log(f"Game {game_cnt}: Score {stats['score']:.0f}")
+                            dashboard.log(f"Game {game_cnt}: Score {stats['score']:.3f}")
                             
                     except queue.Empty:
                         break

@@ -20,7 +20,7 @@ from . import config
 # 1. 高效的 Numpy Replay Buffer
 # ==========================================
 class NumpyReplayBuffer:
-    def __init__(self, capacity, board_shape=(20, 10), ctx_dim=11, action_dim=256):
+    def __init__(self, capacity, board_shape=(20, 10), ctx_dim=11, action_dim=config.ACTION_DIM):
         self.capacity = capacity
         self.ptr = 0
         self.size = 0
@@ -28,7 +28,7 @@ class NumpyReplayBuffer:
         # 使用 int8 存储 Board，节省 75% 内存 (Tetris Board 只有 0 或 1-N，int8 足够)
         self.boards = np.zeros((capacity, *board_shape), dtype=np.int8)
         self.ctxs = np.zeros((capacity, ctx_dim), dtype=np.float32)
-        self.probs = np.zeros((capacity, action_dim), dtype=np.float32)
+        self.probs = np.zeros((capacity, action_dim), dtype=np.float32) 
         # Value 是一维的
         self.values = np.zeros((capacity, 1), dtype=np.float32)
 
@@ -151,18 +151,48 @@ def battle_simulation(game, mcts, render=False):
         # 获取策略
         temp = 1.0 if steps < 30 else 0.5
         action_probs = mcts.get_action_probs(root, temp=temp)
+
+        action_probs = np.nan_to_num(action_probs, nan=0.0)
+
+        # 2. 重新归一化 (Renormalize)
+        s = np.sum(action_probs)
+        if s < 1e-9:
+            # 如果全是 0，随机选一个合法动作
+            # 但这里我们只有 2304 维的向量，不知道哪些是合法的 mask
+            # 如果发生这种情况，说明 MCTS 彻底失败了，通常不会走到这里
+            # 为了防止 Crash，我们均匀分布
+            action_probs = np.ones_like(action_probs) / len(action_probs)
+        else:
+            action_probs /= s
         
         # 收集数据 [Board, Ctx, Probs, Value_Placeholder]
         # 注意：这里存入的是已经 copy 过的 board
         training_data.append([board, prev_ctx, action_probs, None])
         
         # 采样动作
-        legal = game.get_legal_moves()
+        legal, ids = game.get_legal_moves_with_ids() # 确保这里用的是新接口
         if len(legal) == 0:
             break
+   
+        # === 修复：仅在合法动作范围内采样 ===
+        # action_probs 是 2304 维的，直接 choice(2304) 可能会选到非法动作
+        # 应该从 legal moves 中选
+        
+        # 提取当前合法动作对应的概率
+        valid_probs = action_probs[ids]
+        
+        # 再次归一化 Valid Probs (防止精度误差)
+        s_valid = np.sum(valid_probs)
+        if s_valid < 1e-9:
+            valid_probs = np.ones_like(valid_probs) / len(valid_probs)
+        else:
+            valid_probs /= s_valid
             
-        action_idx = np.random.choice(len(action_probs), p=action_probs)
-        move = root.legal_moves[action_idx]
+        # 在合法动作的索引 (0, 1, 2...) 中采样
+        action_idx_in_legal = np.random.choice(len(legal), p=valid_probs)
+        
+        # 获取对应的 Move
+        move = legal[action_idx_in_legal]
         
         # 执行
         episode_stats['pieces_since_last_garbage'] += 1
@@ -186,7 +216,8 @@ def battle_simulation(game, mcts, render=False):
             'damage_sent': res[1],
             'attack_type': res[2],
             'game_over': res[3],
-            'combo': res[4]
+            'b2b_count': res[4],
+            'combo': res[5]
         }
         
         step_reward, force_over = get_reward(

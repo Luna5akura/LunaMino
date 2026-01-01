@@ -40,10 +40,11 @@ def _fast_ucb(visits, value_sums, priors, parent_sqrt, c_puct):
 # 2. 优化后的 Node 结构
 # ==========================================
 class MCTSNode:
-    __slots__ = ('legal_moves', 'stats', 'children', 'num_actions', 'is_expanded')
-
-    def __init__(self, prior_probs, legal_moves):
+    __slots__ = ('legal_moves', 'stats', 'children', 'num_actions', 'is_expanded', 'action_ids')
+    def __init__(self, prior_probs, legal_moves, action_ids):
         self.legal_moves = legal_moves
+
+        self.action_ids = action_ids # 关键：保存 ID
         self.num_actions = len(legal_moves)
         
         # stats layout: [N, 3] -> (visit_count, value_sum, prior)
@@ -138,10 +139,19 @@ class MCTS:
         probs_list = []
         for i in range(count):
             list_idx = valid_indices[i]
-            num_legal = len(legal_move_lists[list_idx])
-            
-            # Extract valid logits
-            valid_logits = logits_np[i, :num_legal]
+            # 改：（假设legal_move_lists现在是[(moves, ids), ...]）
+            moves, ids = legal_move_lists[list_idx]
+            num_legal = len(moves)
+            if num_legal == 0:
+                probs = np.array([], dtype=np.float32)
+            else:
+                # 使用ids从full logits中gather valid_logits
+                valid_logits = logits_np[i][ids]  # Shape: (num_legal,)
+                
+                # Stable softmax
+                max_l = np.max(valid_logits)
+                exps = np.exp(valid_logits - max_l)
+                probs = exps / np.sum(exps)
             
             # Numerically stable Softmax
             max_l = np.max(valid_logits)
@@ -156,9 +166,9 @@ class MCTS:
         执行 MCTS 搜索。
         """
         # --- 1. Root Expansion ---
-        legal = game_state.get_legal_moves()
+        legal, action_ids = game_state.get_legal_moves_with_ids()
         if len(legal) == 0:
-            return MCTSNode(np.array([], dtype=np.float32), np.array([]))
+            return MCTSNode(np.array([], dtype=np.float32), legal, action_ids)
 
         # 快速评估根节点
         board, ctx = game_state.get_state()
@@ -170,19 +180,22 @@ class MCTS:
         with torch.no_grad(), autocast(device_type='cuda'):
             logits, _ = self.model(t_board, t_ctx)
         
-        logits = logits[0].float().cpu().numpy()
-        valid_logits = logits[:len(legal)]
+        full_logits = logits[0].float().cpu().numpy() # Shape (2304,)
         
-        # Softmax & Noise
+        # === MASKING ===
+        # 根据 action_ids 提取对应的 logits
+        valid_logits = full_logits[action_ids]
+        
+        # Softmax
         probs = np.exp(valid_logits - np.max(valid_logits))
         probs /= np.sum(probs)
         
+        # Noise
         noise = np.random.dirichlet([config.MCTS_DIRICHLET] * len(legal))
         probs = (1 - config.MCTS_EPSILON) * probs + config.MCTS_EPSILON * noise
         
-        root = MCTSNode(probs, legal)
-        # 初始访问计数设为1，避免 sqrt(0)
-        # root.stats[:, 0] += 1e-8 
+        # 创建 Root
+        root = MCTSNode(probs, legal, action_ids)
 
         # --- 2. Simulation Loop (Batched) ---
         # 虚拟损失常量
@@ -247,8 +260,8 @@ class MCTS:
                     # 把指针所有权移交给 TetrisGame 对象
                     leaf_game = TetrisGame(ptr=game_ptr)
                     raw_ptrs_to_free.pop() # 不再需要在 finally 块释放，由 leaf_game 析构
-                    
-                    moves = leaf_game.get_legal_moves()
+                    moves, ids = leaf_game.get_legal_moves_with_ids()
+                    leaf_legal_moves.append((moves, ids))  # 存tuple: (moves, ids)
                     if len(moves) == 0:
                         # Terminal state logic
                         leaf_games.append(None)
@@ -340,35 +353,43 @@ class MCTS:
 
     def get_action_probs(self, root, temp=1.0):
         """
-        获取动作概率，并填充到固定长度 (256)，以便存入 ReplayBuffer
+        获取动作概率，并填充到固定长度 (2304)
         """
         visits = root.stats[:, 0]
         
-        # 计算当前合法动作的概率
-        if temp == 0:
+        # === 修复开始：处理 Visits 全为 0 或 Sum 为 0 的情况 ===
+        if np.sum(visits) == 0:
+            # 如果没有访问量（比如模拟次数太少，或者刚初始化），使用均匀分布
+            # 避免除以 0 产生 NaN
+            probs_compact = np.ones_like(visits) / len(visits)
+        elif temp == 0:
+            # 贪婪模式：选访问量最大的
             best_idx = np.argmax(visits)
-            probs = np.zeros_like(visits)
-            probs[best_idx] = 1.0
+            probs_compact = np.zeros_like(visits)
+            probs_compact[best_idx] = 1.0
         else:
+            # 带温度的随机模式
+            # 增加数值稳定性：避免 float32 下溢
+            visits = visits.astype(np.float64) # 临时转高精度计算
             visits_temp = visits ** (1.0 / temp)
-            total = np.sum(visits_temp)
-            if total > 0:
-                probs = visits_temp / total
+            total_temp = np.sum(visits_temp)
+            
+            if total_temp < 1e-9:
+                # 极小值保护
+                probs_compact = np.ones_like(visits) / len(visits)
             else:
-                probs = np.ones_like(visits) / len(visits)
+                probs_compact = visits_temp / total_temp
+            
+            probs_compact = probs_compact.astype(np.float32) # 转回 float32
+        # === 修复结束 ===
+
+        # 映射回 2304 维
+        full_probs = np.zeros(config.ACTION_DIM, dtype=np.float32)
         
-        # === 修复开始：填充到固定维度 (256) ===
-        # 必须与 model.py 中的 action_dim 和 train.py 中的 buffer 保持一致
-        ACTION_DIM = 256 
-        full_probs = np.zeros(ACTION_DIM, dtype=np.float32)
-        
-        # 将计算出的概率填入对应位置
-        # 注意：这里假设网络输出的前 N 个节点对应 N 个合法动作
-        num_legal = len(probs)
-        if num_legal > 0:
-            # 防止溢出 (理论上不应该发生，除非 legal_moves 超过 256)
-            limit = min(num_legal, ACTION_DIM)
-            full_probs[:limit] = probs[:limit]
+        # 只有当 action_ids 有效时才填充
+        if hasattr(root, 'action_ids') and len(root.action_ids) > 0:
+             # 确保长度匹配
+            limit = min(len(probs_compact), len(root.action_ids))
+            full_probs[root.action_ids[:limit]] = probs_compact[:limit]
             
         return full_probs
-        # === 修复结束 ===

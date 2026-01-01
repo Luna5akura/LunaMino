@@ -1,7 +1,9 @@
 # ai/get_reward.py
 
+
 import numpy as np
 from numba import njit
+from . import config
 
 @njit(cache=True, fastmath=True, nogil=True)
 def _fast_heuristics(board_state):
@@ -70,40 +72,60 @@ def get_reward(step_result, current_metrics, prev_metrics, steps_survived,
     lines = int(step_result.get('lines_cleared', 0))
     game_over = step_result.get('game_over', False)
     
-    # 1. 消除奖励 (保持，甚至可以适当提高比重)
+    # -------------------------------------------------------------------------
+    # [新增逻辑] 计数器初始化与更新
+    # -------------------------------------------------------------------------
+    if episode_stats is not None:
+        # 1. 连续空洞增加计数
+        cur_holes = current_metrics['holes']
+        prev_holes_val = prev_metrics.get('holes', 0)
+        
+        if cur_holes > prev_holes_val:
+            episode_stats['consecutive_hole_inc'] = episode_stats.get('consecutive_hole_inc', 0) + 1
+        else:
+            # 只要有一步没增加，就重置（如果想改为"净增加"逻辑可以调整这里，但"连续"通常指中断即重置）
+            episode_stats['consecutive_hole_inc'] = 0
+            
+        # 2. 连续最高高度增加计数
+        cur_max_h = current_metrics['max_height']
+        prev_max_h_val = prev_metrics.get('max_height', 0)
+        
+        if cur_max_h > prev_max_h_val:
+            episode_stats['consecutive_height_inc'] = episode_stats.get('consecutive_height_inc', 0) + 1
+        else:
+            episode_stats['consecutive_height_inc'] = 0
+    # -------------------------------------------------------------------------
+
+    # 1. 消除奖励
     if lines > 0:
-        if lines == 1: reward += 10       # 降低绝对值，让数值范围可控
-        elif lines == 2: reward += 30
-        elif lines == 3: reward += 60
-        elif lines == 4: reward += 120    # 鼓励 Tetris
+        if lines == 1: reward += 100       
+        elif lines == 2: reward += 300
+        elif lines == 3: reward += 600
+        elif lines == 4: reward += 1200    
         
         combo = step_result.get('combo', 0)
         if combo > 0: reward += combo * 5
 
-    # 2. 状态惩罚 (关键修改！！！)
-    cur_holes = current_metrics['holes']
-    prev_holes = prev_metrics.get('holes', 0)
-    max_h = current_metrics['max_height']
-    
-    # [修改点 1] 只有极其微小的存活奖励，防止它为了刷分而故意不消除
+    # 2. 状态惩罚
+    # 只有极其微小的存活奖励，防止它为了刷分而故意不消除
     reward += 0.01 
 
-    # [修改点 2] 极其温和的空洞惩罚
-    # 现在的 AI 还没学会走路，不要打断它的腿
-    # 只要有空洞，每步微扣
+    # 极其温和的空洞惩罚
     reward += 0.05 
     
-    reward -= 0.1 * cur_holes  # Or fixed: if cur_holes > 0: reward -= 0.05
-    # 新增空洞惩罚：从 300 降到 2.0
-    # 只有当它真的产生新空洞时才扣分，但不要扣死
+    # 基础空洞扣分
+    cur_holes = current_metrics['holes']
+    prev_holes = prev_metrics.get('holes', 0)
+    reward -= 0.1 * cur_holes 
+
+    # 动态空洞惩罚/奖励
     if cur_holes > prev_holes:
         reward -= (cur_holes - prev_holes) * 30 
-    
-    # 填洞奖励：鼓励它填坑
-    elif cur_holes < prev_holes:
-        reward += (prev_holes - cur_holes) * 20
+    else:
+        reward += (prev_holes - cur_holes) * 200
 
     # 高度惩罚
+    max_h = current_metrics['max_height']
     if max_h > 10:
         reward -= (max_h - 10) * 0.1
     
@@ -112,18 +134,32 @@ def get_reward(step_result, current_metrics, prev_metrics, steps_survived,
 
     # 3. 游戏结束
     if game_over:
-        reward -= 5.0 # 只要比消除 Tetris (12.0) 小，它就会为了消除而冒险，但比一步乱走大
+        reward -= 50
     
     # 4. 训练截断 (Force Game Over)
-    # 如果你也想训练它不自杀，这里不要扣太多，或者不算入 value
+    force_game_over = False
+    
     if is_training:
-        if max_h > 18 or cur_holes > 20: # 放宽一点条件
-            reward -= 2.0
+        # [修改点] 检查连续恶化条件
+        # 注意：这里给了较重的惩罚 (-5.0)，因为这是非常糟糕的行为
+        consecutive_holes = episode_stats.get('consecutive_hole_inc', 0)
+        consecutive_height = episode_stats.get('consecutive_height_inc', 0)
+        
+        if consecutive_holes >= 3:
+            reward -= 50
             force_game_over = True
-        else:
-            force_game_over = False
-    else:
-        force_game_over = False
+            # print(f"Force Over: Consecutive Holes ({consecutive_holes})")
             
-    # 现在的 reward 范围大概在 [-5, +15] 之间，而不是 [-6000, +1000]
+        elif consecutive_height >= 3:
+            reward -= 50
+            force_game_over = True
+            # print(f"Force Over: Consecutive Height ({consecutive_height})")
+            
+        # 原有的截断逻辑 (防止死循环或无效探索)
+        elif max_h > 18 or cur_holes > 10: 
+            reward -= 20
+            force_game_over = True
+            
+
+    reward = (reward + config.SCORE_OFFSET)/config.SCORE_SCALER
     return float(reward), bool(force_game_over)

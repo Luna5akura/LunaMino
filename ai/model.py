@@ -3,6 +3,7 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from . import config
 
 # 1. 将 ResidualBlock 转换为 JIT Script 兼容写法
 class ResidualBlock(nn.Module):
@@ -26,7 +27,7 @@ class ResidualBlock(nn.Module):
         return out
 
 class TetrisPolicyValue(nn.Module):
-    def __init__(self, num_res_blocks=3, action_dim=256, context_dim=11):
+    def __init__(self, num_res_blocks=3, action_dim=config.ACTION_DIM, context_dim=11):
         super().__init__()
         self.filters = 32
         
@@ -51,16 +52,18 @@ class TetrisPolicyValue(nn.Module):
         # --- Policy Head ---
         # 优化：Conv 减少通道 -> Flatten -> Concat -> MLP
         # 保持空间信息直到 Flatten
+        # --- Policy Head ---
         self.p_conv = nn.Sequential(
             nn.Conv2d(self.filters, 4, kernel_size=1, bias=False),
             nn.BatchNorm2d(4),
             nn.ReLU(inplace=True)
         )
-        # Flatten size: 4 * 20 * 10 = 800
+        
+        # 为了适应更大的 Action Space，建议稍微增加 Policy Head 的隐藏层宽度
         self.p_fc = nn.Sequential(
-            nn.Linear(800 + 32, 256), 
+            nn.Linear(800 + 32, 512), # 增加到 512
             nn.ReLU(inplace=True),
-            nn.Linear(256, action_dim)
+            nn.Linear(512, action_dim) # 输出 2304
         )
         
         # --- Value Head ---

@@ -96,7 +96,8 @@ def run_greedy_test(args):
                             'damage_sent': res[1],
                             'attack_type': res[2],
                             'game_over': res[3],
-                            'combo': res[4]
+                            'b2b_count': res[4],
+                            'combo': res[5]
                         }
                         
                         reward, force_over = get_reward(
@@ -176,9 +177,9 @@ def run_greedy_test(args):
                 stats['lines'] += lines
                 if lines == 4:
                     stats['tetrises'] += 1
-                    stats['score'] += 800 * (res[4] + 1)
+                    stats['score'] += 800 * (res[5] + 1)
                 elif lines > 0:
-                    stats['score'] += 100 * lines * (res[4] + 1)
+                    stats['score'] += 100 * lines * (res[5] + 1)
                 
                 stats['steps'] += 1
                 
