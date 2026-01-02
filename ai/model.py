@@ -2,19 +2,40 @@
 
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 from . import config
 
-# 1. 将 ResidualBlock 转换为 JIT Script 兼容写法
+class SEBlock(nn.Module):
+    def __init__(self, channels, reduction=8):
+        super().__init__()
+        # 优化 1: 使用 1x1 卷积代替 Linear，避免 view/reshape 操作
+        # 保持数据格式为 (B, C, 1, 1)
+        mid_channels = channels // reduction
+        self.se = nn.Sequential(
+            nn.Conv2d(channels, mid_channels, kernel_size=1, bias=False),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(mid_channels, channels, kernel_size=1, bias=False),
+            nn.Sigmoid()
+        )
+
+    def forward(self, x):
+        # 优化 2: 使用 mean 代替 AdaptiveAvgPool2d，速度更快
+        # x: (B, C, H, W) -> mean -> (B, C, 1, 1)
+        y = x.mean((2, 3), keepdim=True)
+        y = self.se(y)
+        return x * y
+
 class ResidualBlock(nn.Module):
-    def __init__(self, channels):
+    def __init__(self, channels, use_se=True):
         super().__init__()
         self.conv1 = nn.Conv2d(channels, channels, kernel_size=3, padding=1, bias=False)
         self.bn1 = nn.BatchNorm2d(channels)
+        self.relu = nn.ReLU(inplace=True)
         self.conv2 = nn.Conv2d(channels, channels, kernel_size=3, padding=1, bias=False)
         self.bn2 = nn.BatchNorm2d(channels)
-        self.relu = nn.ReLU(inplace=True)
-
+        self.use_se = use_se
+        if use_se:
+            self.se = SEBlock(channels)
+        
     def forward(self, x):
         residual = x
         out = self.conv1(x)
@@ -22,65 +43,77 @@ class ResidualBlock(nn.Module):
         out = self.relu(out)
         out = self.conv2(out)
         out = self.bn2(out)
-        out += residual
+        
+        if self.use_se:
+            out = self.se(out)
+        
+        # 优化 3: 显式 In-place 加法，利于算子融合
+        out.add_(residual)
         out = self.relu(out)
         return out
 
 class TetrisPolicyValue(nn.Module):
-    def __init__(self, num_res_blocks=3, action_dim=config.ACTION_DIM, context_dim=11):
+    def __init__(self, num_res_blocks=6, channels=32, action_dim=config.ACTION_DIM, context_dim=11):
         super().__init__()
-        self.filters = 32
         
-        # Backbone
+        # 骨干网络
         self.conv_in = nn.Sequential(
-            nn.Conv2d(1, self.filters, kernel_size=3, padding=1, bias=False),
-            nn.BatchNorm2d(self.filters),
+            nn.Conv2d(1, channels, kernel_size=3, padding=1, bias=False),
+            nn.BatchNorm2d(channels),
             nn.ReLU(inplace=True)
         )
         
-        # 使用 ModuleList 或 Sequential 均可，Sequential 对 JIT 更友好
-        self.res_blocks = nn.Sequential(
-            *[ResidualBlock(self.filters) for _ in range(num_res_blocks)]
-        )
+        # 使用 ModuleList 并没有 Sequential 快，但在 export 时有时更灵活，这里保持 Sequential
+        self.res_blocks = nn.Sequential(*[
+            ResidualBlock(channels, use_se=True) for _ in range(num_res_blocks)
+        ])
         
-        # Context MLP
         self.fc_ctx = nn.Sequential(
-            nn.Linear(context_dim, 32),
+            nn.Linear(context_dim, 32), 
             nn.ReLU(inplace=True)
         )
         
-        # --- Policy Head ---
-        # 优化：Conv 减少通道 -> Flatten -> Concat -> MLP
-        # 保持空间信息直到 Flatten
-        # --- Policy Head ---
+        # -----------------------------------------------------
+        # Policy Head
+        # -----------------------------------------------------
+        self.p_head_channels = 16
         self.p_conv = nn.Sequential(
-            nn.Conv2d(self.filters, 4, kernel_size=1, bias=False),
-            nn.BatchNorm2d(4),
+            nn.Conv2d(channels, self.p_head_channels, kernel_size=1, bias=False),
+            nn.BatchNorm2d(self.p_head_channels),
             nn.ReLU(inplace=True)
         )
         
-        # 为了适应更大的 Action Space，建议稍微增加 Policy Head 的隐藏层宽度
+        # 预计算 flatten 后的大小: 16 * 20 * 10 = 3200
+        p_fc_input_dim = self.p_head_channels * 200 + 32
+        
         self.p_fc = nn.Sequential(
-            nn.Linear(800 + 32, 512), # 增加到 512
+            nn.Linear(p_fc_input_dim, 512),
             nn.ReLU(inplace=True),
-            nn.Linear(512, action_dim) # 输出 2304
+            nn.Dropout(0.3),
+            nn.Linear(512, action_dim)
         )
         
-        # --- Value Head ---
+        # -----------------------------------------------------
+        # Value Head
+        # -----------------------------------------------------
+        self.v_head_channels = 2
         self.v_conv = nn.Sequential(
-            nn.Conv2d(self.filters, 2, kernel_size=1, bias=False),
-            nn.BatchNorm2d(2),
+            nn.Conv2d(channels, self.v_head_channels, kernel_size=1, bias=False),
+            nn.BatchNorm2d(self.v_head_channels),
             nn.ReLU(inplace=True)
         )
-        # Flatten size: 2 * 20 * 10 = 400
+        
+        # 预计算: 2 * 20 * 10 = 400
+        v_fc_input_dim = self.v_head_channels * 200 + 32
+        
         self.v_fc = nn.Sequential(
-            nn.Linear(400 + 32, 128),
+            nn.Linear(v_fc_input_dim, 128),
             nn.ReLU(inplace=True),
+            nn.Dropout(0.3),
             nn.Linear(128, 1),
             nn.Tanh()
         )
-
-        # 3. 显式权重初始化 (加速收敛)
+        
         self._init_weights()
 
     def _init_weights(self):
@@ -91,47 +124,42 @@ class TetrisPolicyValue(nn.Module):
                 nn.init.constant_(m.weight, 1)
                 nn.init.constant_(m.bias, 0)
             elif isinstance(m, nn.Linear):
-                nn.init.orthogonal_(m.weight) # RL 中常用正交初始化
-                if m.bias is not None:
-                    nn.init.constant_(m.bias, 0)
+                nn.init.orthogonal_(m.weight)
+                if m.bias is not None: nn.init.constant_(m.bias, 0)
 
-    # 2. 移除 dim 检查，配合 JIT 装饰器
-    # 注意：在外部实例化模型后，建议调用 model = torch.jit.script(model)
     def forward(self, board, context):
-        # 假设输入已经是 (B, 1, 20, 10)，移除了 unsqueeze 判断以提升速度
-        # Backbone
+        # 建议: 外部调用时使用 with torch.inference_mode():
+        
         x = self.conv_in(board)
         x = self.res_blocks(x)
         
-        # Context Feature (B, 32)
-        ctx_feat = self.fc_ctx(context)
+        # 此时 x: (B, 64, 20, 10)
         
-        # --- Policy Path ---
-        p_x = self.p_conv(x)
-        p_x = p_x.flatten(1) # (B, 800)
-        # 显式拼接，避免不必要的中间变量
-        logits = self.p_fc(torch.cat([p_x, ctx_feat], dim=1))
+        # 处理 Context
+        ctx_feat = self.fc_ctx(context) # (B, 32)
         
-        # --- Value Path ---
-        v_x = self.v_conv(x)
-        v_x = v_x.flatten(1) # (B, 400)
-        value = self.v_fc(torch.cat([v_x, ctx_feat], dim=1))
+        # Policy Path
+        p_x = self.p_conv(x)          # (B, 16, 20, 10)
+        p_x = p_x.flatten(1)          # (B, 3200) - view 操作，零拷贝
+        
+        # 优化: 这里的 cat 不可避免，但由于维度较小，开销可控
+        p_in = torch.cat([p_x, ctx_feat], dim=1)
+        logits = self.p_fc(p_in)
+        
+        # Value Path
+        v_x = self.v_conv(x)          # (B, 2, 20, 10)
+        v_x = v_x.flatten(1)          # (B, 400)
+        
+        v_in = torch.cat([v_x, ctx_feat], dim=1)
+        value = self.v_fc(v_in)
         
         return logits, value
 
-# 辅助函数：用于 MCTS 初始化时确保模型处于最佳状态
-def load_optimized_model(device):
-    model = TetrisPolicyValue().to(device)
-    # 开启 Channels Last 内存布局 (对 Tensor Core 友好)
-    model = model.to(memory_format=torch.channels_last)
-    model.eval()
-    
-    # 尝试 JIT 编译 (如果环境支持)
-    # try:
-    #     # 需要提供样例输入来 Trace，或者直接 Script
-    #     # 对于包含动态逻辑较少的模型，script 更好
-    #     model = torch.jit.script(model)
-    # except Exception as e:
-    #     print(f"JIT Compilation skipped: {e}")
-        
-    return model
+    def to_efficient_memory_format(self):
+        """
+        辅助函数: 将模型转换为 Channels Last 格式 (NHWC)。
+        在 NVIDIA GPU (Tensor Cores) 上通常能获得 20%+ 的加速。
+        用法: model = TetrisPolicyValue().cuda().to_efficient_memory_format()
+        """
+        self.to(memory_format=torch.channels_last)
+        return self

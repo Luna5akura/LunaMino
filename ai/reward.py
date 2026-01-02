@@ -1,165 +1,113 @@
-# ai/get_reward.py
-
+# ai/reward.py
 
 import numpy as np
 from numba import njit
 from . import config
 
+# ----------------------------------------------------------------------
+# 优化点 1 & 2: 
+# 使用 Numba 加速启发式计算，移除无用的变量，使用 fastmath。
+# ----------------------------------------------------------------------
 @njit(cache=True, fastmath=True, nogil=True)
-def _fast_heuristics(board_state):
-    rows, cols = board_state.shape
+def _fast_heuristics(board):
+    rows, cols = board.shape
+    # 使用 int32 避免溢出
     heights = np.zeros(cols, dtype=np.int32)
-    row_blocks = np.zeros(rows, dtype=np.int32)
-    holes = 0
     
+    holes = 0
+    agg_height = 0
+    
+    # 单次遍历计算 Heights, Aggregate Height 和 Holes
     for c in range(cols):
-        found_top = False
+        found = False
         for r in range(rows):
-            val = board_state[r, c]
-            if val > 0:
-                row_blocks[r] += 1
-                if not found_top:
-                    heights[c] = rows - r
-                    found_top = True
-            elif found_top:
+            if board[r, c] > 0:
+                if not found:
+                    h = rows - r
+                    heights[c] = h
+                    agg_height += h
+                    found = True
+            elif found:
                 holes += 1
                 
-    max_height = 0
-    agg_height = 0
-    for h in heights:
-        if h > max_height: max_height = h
-        agg_height += h
-        
+    # 独立的 Bumpiness 循环
     bumpiness = 0
     for c in range(cols - 1):
-        diff = heights[c] - heights[c+1]
-        if diff < 0: diff = -diff
-        bumpiness += diff
+        bumpiness += abs(heights[c] - heights[c+1])
         
-    near_clears = 0
-    for r in range(rows):
-        if row_blocks[r] >= 8: near_clears += 1
+    max_height = 0
+    for h in heights:
+        if h > max_height: max_height = h
         
-    return max_height, holes, bumpiness, agg_height, heights, near_clears
+    # 直接返回标量 Tuple
+    return max_height, holes, bumpiness, agg_height
 
 def calculate_heuristics(board_state):
-    # 保持原样，处理 contiguous
+    """
+    输入: board_state (numpy array, uint8)
+    输出: tuple (max_height, holes, bumpiness, agg_height)
+    """
+    # 优化点 3: 移除不必要的 astype 拷贝，除非内存不连续
     if not board_state.flags['C_CONTIGUOUS']:
-        board = np.ascontiguousarray(board_state, dtype=np.int32)
-    else:
-        if board_state.dtype != np.int32:
-            board = board_state.astype(np.int32)
-        else:
-            board = board_state
+        board_state = np.ascontiguousarray(board_state)
     
-    max_h, holes, bump, agg_h, heights, near_c = _fast_heuristics(board)
-    return {
-        'max_height': int(max_h),
-        'holes': int(holes),
-        'bumpiness': float(bump),
-        'agg_height': int(agg_h),
-        'heights': heights,
-        'near_clears': int(near_c)
-    }
+    return _fast_heuristics(board_state)
 
-# ==========================================
-# 优化后的 Reward 函数
-# ==========================================
-def get_reward(step_result, current_metrics, prev_metrics, steps_survived,
-               context=None, prev_context=None, episode_stats=None, is_training=True):
+def get_reward(step_result, current_stats, prev_stats, steps_survived, episode_stats=None, is_training=True):
+    """
+    参数:
+      step_result: tuple (lines, damage, type, game_over, b2b, combo)
+      current_stats: tuple (max_h, holes, bump, agg_h)
+      prev_stats: tuple (max_h, holes, bump, agg_h)
+    """
     reward = 0.0
     
-    lines = int(step_result.get('lines_cleared', 0))
-    game_over = step_result.get('game_over', False)
+    # ------------------------------------------------------------------
+    # 修复点: 使用索引解包 tuple，对应 utils.py 中 step() 的返回值顺序
+    # 0: lines, 1: damage, 2: type, 3: game_over, 4: b2b, 5: combo
+    # ------------------------------------------------------------------
+    lines = step_result[0]
+    game_over = step_result[3]
     
-    # -------------------------------------------------------------------------
-    # [新增逻辑] 计数器初始化与更新
-    # -------------------------------------------------------------------------
-    if episode_stats is not None:
-        # 1. 连续空洞增加计数
-        cur_holes = current_metrics['holes']
-        prev_holes_val = prev_metrics.get('holes', 0)
-        
-        if cur_holes > prev_holes_val:
-            episode_stats['consecutive_hole_inc'] = episode_stats.get('consecutive_hole_inc', 0) + 1
-        else:
-            # 只要有一步没增加，就重置（如果想改为"净增加"逻辑可以调整这里，但"连续"通常指中断即重置）
-            episode_stats['consecutive_hole_inc'] = 0
-            
-        # 2. 连续最高高度增加计数
-        cur_max_h = current_metrics['max_height']
-        prev_max_h_val = prev_metrics.get('max_height', 0)
-        
-        if cur_max_h > prev_max_h_val:
-            episode_stats['consecutive_height_inc'] = episode_stats.get('consecutive_height_inc', 0) + 1
-        else:
-            episode_stats['consecutive_height_inc'] = 0
-    # -------------------------------------------------------------------------
-
-    # 1. 消除奖励
-    if lines > 0:
-        if lines == 1: reward += 100       
-        elif lines == 2: reward += 300
-        elif lines == 3: reward += 600
-        elif lines == 4: reward += 1200    
-        
-        combo = step_result.get('combo', 0)
-        if combo > 0: reward += combo * 5
-
-    # 2. 状态惩罚
-    # 只有极其微小的存活奖励，防止它为了刷分而故意不消除
-    reward += 0.01 
-
-    # 极其温和的空洞惩罚
-    reward += 0.05 
+    # Tuple 解包
+    cur_max_h, cur_holes, cur_bump, cur_agg = current_stats
+    prev_max_h, prev_holes, prev_bump, prev_agg = prev_stats
     
-    # 基础空洞扣分
-    cur_holes = current_metrics['holes']
-    prev_holes = prev_metrics.get('holes', 0)
-    reward -= 0.1 * cur_holes 
-
-    # 动态空洞惩罚/奖励
+    # 1. 高度奖励/惩罚
+    if cur_agg < prev_agg:
+        reward += 0.02 * (prev_agg - cur_agg)
+    
+    # 2. 空洞惩罚 (加大惩罚力度)
     if cur_holes > prev_holes:
-        reward -= (cur_holes - prev_holes) * 30 
-    else:
-        reward += (prev_holes - cur_holes) * 200
-
-    # 高度惩罚
-    max_h = current_metrics['max_height']
-    if max_h > 10:
-        reward -= (max_h - 10) * 0.1
+        reward -= 0.5 * (cur_holes - prev_holes)
+    elif cur_holes < prev_holes:
+        reward += 0.5 * (prev_holes - cur_holes)
     
-    # 崎岖度惩罚
-    reward -= current_metrics['bumpiness'] * 0.01
-
-    # 3. 游戏结束
+    # 3. 崎岖度惩罚
+    if cur_bump < prev_bump:
+        reward += 0.05
+    elif cur_bump > prev_bump:
+        reward -= 0.05
+    
+    # 4. 存活奖励
+    reward += 0.01
+    
+    # 5. 消行奖励 (查表优化)
+    if lines > 0:
+        if lines == 1: reward += 2.0
+        elif lines == 2: reward += 5.0
+        elif lines == 3: reward += 10.0
+        elif lines == 4: reward += 20.0
+    
+    # 6. 游戏结束惩罚
     if game_over:
-        reward -= 50
+        reward -= 2.0
     
-    # 4. 训练截断 (Force Game Over)
+    # 7. 训练时的强制结束惩罚 (防止在高处无限苟活)
     force_game_over = False
-    
-    if is_training:
-        # [修改点] 检查连续恶化条件
-        # 注意：这里给了较重的惩罚 (-5.0)，因为这是非常糟糕的行为
-        consecutive_holes = episode_stats.get('consecutive_hole_inc', 0)
-        consecutive_height = episode_stats.get('consecutive_height_inc', 0)
+    if is_training and cur_max_h >= 18:
+        reward -= 5.0
+        force_game_over = True
         
-        if consecutive_holes >= 3:
-            reward -= 50
-            force_game_over = True
-            # print(f"Force Over: Consecutive Holes ({consecutive_holes})")
-            
-        elif consecutive_height >= 3:
-            reward -= 50
-            force_game_over = True
-            # print(f"Force Over: Consecutive Height ({consecutive_height})")
-            
-        # 原有的截断逻辑 (防止死循环或无效探索)
-        elif max_h > 18 or cur_holes > 10: 
-            reward -= 20
-            force_game_over = True
-            
-
-    reward = (reward + config.SCORE_OFFSET)/config.SCORE_SCALER
-    return float(reward), bool(force_game_over)
+    reward = (reward + config.SCORE_OFFSET) / config.SCORE_SCALER
+    return float(reward), force_game_over
