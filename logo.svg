@@ -1,0 +1,72 @@
+<svg width="200" height="200" viewBox="0 0 200 200" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <!-- 1. T块专属：Luna Pink (高饱和粉紫) -->
+    <linearGradient id="tGrad" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" style="stop-color:#F72585;stop-opacity:1" />
+      <stop offset="100%" style="stop-color:#7209B7;stop-opacity:1" />
+    </linearGradient>
+
+    <!-- 2. 月亮专属：Cyber Cyan (青蓝) -->
+    <linearGradient id="moonGrad" x1="100%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" style="stop-color:#4CC9F0;stop-opacity:1" />
+      <stop offset="100%" style="stop-color:#4361EE;stop-opacity:1" />
+    </linearGradient>
+
+    <!-- 3. 极简辉光：只增加一点点光晕，保持边缘清晰 -->
+    <filter id="softGlow" x="-50%" y="-50%" width="200%" height="200%">
+      <feGaussianBlur in="SourceGraphic" stdDeviation="2" result="blur" />
+      <feMerge>
+        <feMergeNode in="blur" />
+        <feMergeNode in="SourceGraphic" />
+      </feMerge>
+    </filter>
+  </defs>
+
+  <!-- 背景：纯黑或深紫黑，衬托高对比度 -->
+  <rect width="200" height="200" rx="40" fill="#0D0D15" />
+
+  <!-- 整体居中 -->
+  <g transform="translate(100, 100)" filter="url(#softGlow)">
+    
+    <!-- 
+      图形 A：青蓝色的月亮 (外部环绕)
+      设计巧思：这是一个圆环，但在上方切出了一个 T 形的缺口 (Negative Space)。
+      它看起来像是一个底座，等待 T 块降落。
+    -->
+    <path d="M -65 -20 
+             A 70 70 0 1 1 65 -20
+             L 65 20 
+             L 25 20 
+             L 25 60 
+             L -25 60 
+             L -25 20 
+             L -65 20 
+             Z" 
+          fill="none" 
+          stroke="url(#moonGrad)" 
+          stroke-width="12"
+          stroke-linecap="square" 
+          transform="rotate(180)" />
+          <!-- rotate(180) 让缺口朝上，像一个托举的手或底座 -->
+
+    <!-- 
+      图形 B：粉紫色的 T 块 (核心主体)
+      它悬浮在月亮的缺口上方。
+      位置设计：它没有完全接触圆环，留出了几像素的“磁悬浮”空隙，增加张力。
+    -->
+    <g transform="translate(0, -15)">
+        <!-- 绘制一个完美的几何 T -->
+        <path d="M -30 -10 
+                 L 30 -10 
+                 L 30 10 
+                 L 10 10 
+                 L 10 30 
+                 L -10 30 
+                 L -10 10 
+                 L -30 10 
+                 Z" 
+              fill="url(#tGrad)" />
+    </g>
+
+  </g>
+</svg>

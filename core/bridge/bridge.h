@@ -5,6 +5,9 @@
 
 #include "../tetris/tetris.h"
 
+// 必须开启强制对齐，否则 int8 后接 int16 会被编译器自动补齐，导致 Python 解包错位
+#pragma pack(push, 1)
+
 typedef struct {
     int lines_cleared;
     int damage_sent;
@@ -19,15 +22,18 @@ typedef struct {
     int8_t y;
     int8_t rotation;
     int8_t landing_height;
-    bool use_hold;
-} MacroAction;
+    int8_t use_hold;       // 1 byte
+    int8_t padding;        // 1 byte (Explicit padding)
+    int16_t id;            // 2 bytes
+} MacroAction;             // Total: 8 bytes exactly
 
 #define MAX_LEGAL_MOVES 256
-
 typedef struct {
     int count;
     MacroAction moves[MAX_LEGAL_MOVES];
 } LegalMoves;
+
+#pragma pack(pop)
 
 // Lifecycle
 Tetris* create_tetris(int seed);
@@ -36,14 +42,9 @@ Tetris* clone_tetris(const Tetris* tetris);
 void ai_reset_game(Tetris* tetris, int seed);
 
 // Observation
-// board_buffer: 200 ints (10x20)
-// queue_buffer: 5 ints
-// hold_buffer: 1 int (-1 if empty)
-// meta_buffer: [b2b, combo, can_hold, current_piece_type, pending_garbage]
-void ai_get_state(const Tetris* tetris, int* board_buffer, int* queue_buffer, int* hold_buffer, int* meta_buffer);
+void ai_get_state(const Tetris* tetris, uint8_t* board_buffer, float* ctx_buffer);
 
 // Action
-// Returns detailed result of the step
 void ai_get_legal_moves(const Tetris* tetris, LegalMoves* out_moves);
 StepResult ai_step(Tetris* tetris, int x, int y, int rotation, int use_hold);
 void ai_receive_garbage(Tetris* tetris, int lines);

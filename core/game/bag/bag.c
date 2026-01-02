@@ -14,7 +14,7 @@ static void _fill_and_shuffle(Bag* bag, uint32_t* rng_state) {
     // 2. 洗牌 (Fisher-Yates)
     for (int i = 6; i > 0; i--) {
         // --- 优化修改：用乘法+移位替换 %，减少偏差和开销 ---
-        uint16_t r = magic_random(rng_state);
+        uint16_t r = util_rand_next(rng_state);
         int j = ((uint32_t)r * (i + 1)) >> 15;
        
         int8_t temp = bag->sequence[i];
