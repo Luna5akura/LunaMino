@@ -1,6 +1,7 @@
 # ai/model.py
 
-import torch
+from torch import cat
+from torch import channels_last
 import torch.nn as nn
 from . import config
 
@@ -143,14 +144,14 @@ class TetrisPolicyValue(nn.Module):
         p_x = p_x.flatten(1)          # (B, 3200) - view 操作，零拷贝
         
         # 优化: 这里的 cat 不可避免，但由于维度较小，开销可控
-        p_in = torch.cat([p_x, ctx_feat], dim=1)
+        p_in = cat([p_x, ctx_feat], dim=1)
         logits = self.p_fc(p_in)
         
         # Value Path
         v_x = self.v_conv(x)          # (B, 2, 20, 10)
         v_x = v_x.flatten(1)          # (B, 400)
         
-        v_in = torch.cat([v_x, ctx_feat], dim=1)
+        v_in = cat([v_x, ctx_feat], dim=1)
         value = self.v_fc(v_in)
         
         return logits, value
@@ -161,5 +162,5 @@ class TetrisPolicyValue(nn.Module):
         在 NVIDIA GPU (Tensor Cores) 上通常能获得 20%+ 的加速。
         用法: model = TetrisPolicyValue().cuda().to_efficient_memory_format()
         """
-        self.to(memory_format=torch.channels_last)
+        self.to(memory_format=channels_last)
         return self

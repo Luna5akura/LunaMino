@@ -1,6 +1,10 @@
 # ai/trainer.py
 
-import torch
+from torch import channels_last
+from torch import load
+from torch import save
+from torch import from_numpy
+
 import torch.optim as optim
 import torch.nn.functional as F
 from torch.amp import autocast, GradScaler
@@ -18,7 +22,7 @@ class TetrisTrainer:
         # 模型初始化
         self.model = TetrisPolicyValue().to(device)
         # 内存格式优化 (NHWC)
-        self.model = self.model.to(memory_format=torch.channels_last)
+        self.model = self.model.to(memory_format=channels_last)
         
         # 编译模型 (PyTorch 2.0+)
         # reduce-overhead 适合小 batch 快速迭代，max-autotune 适合吞吐量
@@ -49,7 +53,7 @@ class TetrisTrainer:
         if os.path.exists(config.CHECKPOINT_FILE):
             ui.log(f"Loading {config.CHECKPOINT_FILE}...")
             try:
-                ckpt = torch.load(config.CHECKPOINT_FILE, map_location=self.device)
+                ckpt = load(config.CHECKPOINT_FILE, map_location=self.device)
                 # 注意：如果使用了 torch.compile，state_dict 的 key 可能会有 '_orig_mod' 前缀
                 # 这里通常 PyTorch 会自动处理，但需留意
                 self.model.load_state_dict(ckpt['model_state_dict'])
@@ -68,7 +72,7 @@ class TetrisTrainer:
         # 获取原始模型参数 (解包 compile 包装)
         model_to_save = self.model._orig_mod if hasattr(self.model, '_orig_mod') else self.model
         
-        torch.save({
+        save({
             'model_state_dict': model_to_save.state_dict(),
             'optimizer_state_dict': self.optimizer.state_dict(),
             'game_idx': self.game_idx
@@ -87,12 +91,12 @@ class TetrisTrainer:
         
         # 2. 传输到 GPU + 强制转为 Float32
         # 注意：这里务必确保是 .float()，不能是 .half()
-        t_b = torch.from_numpy(b_b).to(self.device, non_blocking=True).float()
-        t_b = t_b.contiguous(memory_format=torch.channels_last)
+        t_b = from_numpy(b_b).to(self.device, non_blocking=True).float()
+        t_b = t_b.contiguous(memory_format=channels_last)
         
-        t_c = torch.from_numpy(b_c).to(self.device, non_blocking=True).float() # 确保 Context 也是 float
-        t_p = torch.from_numpy(b_p).to(self.device, non_blocking=True).float()
-        t_v = torch.from_numpy(b_v).to(self.device, non_blocking=True).float() # 确保 Value 也是 float
+        t_c = from_numpy(b_c).to(self.device, non_blocking=True).float() # 确保 Context 也是 float
+        t_p = from_numpy(b_p).to(self.device, non_blocking=True).float()
+        t_v = from_numpy(b_v).to(self.device, non_blocking=True).float() # 确保 Value 也是 float
         
         self.model.train()
         self.optimizer.zero_grad(set_to_none=True)
@@ -122,4 +126,10 @@ class TetrisTrainer:
         self.scaler.step(self.optimizer)
         self.scaler.update()
         
-        return loss.item()
+        
+        return {
+            "loss": loss.item(),
+            "loss_p": loss_policy.item(),
+            "loss_v": loss_value.item(),
+            "lr": self.optimizer.param_groups[0]['lr']
+        }

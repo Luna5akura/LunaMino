@@ -1,11 +1,18 @@
 # ai/mcts.py
 
+import random
+from torch import tensor
+from torch import zeros
+from torch import uint8
+from torch import float32
+from torch import inference_mode
+from torch import amp
 import math
 import numpy as np
-import torch
 import ctypes
 from numba import njit
 from .utils import lib, LegalMoves
+from .reward import _fast_heuristics
 from . import config
 
 @njit(cache=True, fastmath=True, nogil=True)
@@ -65,8 +72,8 @@ class MCTS:
         self.c_moves_struct = LegalMoves()
         
         # Pinned Memory buffers
-        self.cpu_board_buffer = torch.zeros((batch_size, 200), dtype=torch.uint8, pin_memory=('cuda' in device))
-        self.cpu_ctx_buffer = torch.zeros((batch_size, 11), dtype=torch.float32, pin_memory=('cuda' in device))
+        self.cpu_board_buffer = zeros((batch_size, 200), dtype=uint8, pin_memory=('cuda' in device))
+        self.cpu_ctx_buffer = zeros((batch_size, 11), dtype=float32, pin_memory=('cuda' in device))
         
         self.board_ptr_base = self.cpu_board_buffer.data_ptr()
         self.ctx_ptr_base = self.cpu_ctx_buffer.data_ptr()
@@ -102,22 +109,36 @@ class MCTS:
         c_ubyte_p = ctypes.POINTER(ctypes.c_ubyte)
         c_float_p = ctypes.POINTER(ctypes.c_float)
 
+        # 1. 填充 CPU Buffer (准备送入 GPU)
         for i in range(batch_count):
             b_addr = board_base + i * board_stride
             c_addr = ctx_base + i * ctx_stride * 4
             c_get_state(leaf_ptrs[i], ctypes.cast(b_addr, c_ubyte_p), ctypes.cast(c_addr, c_float_p))
 
+        # 2. 神经网络推理
         input_board = self.cpu_board_buffer[:batch_count].to(self.device, non_blocking=True).float()
         input_ctx = self.cpu_ctx_buffer[:batch_count].to(self.device, non_blocking=True)
-        input_board = input_board.view(batch_count, 20, 10).flip(1).unsqueeze(1)
+        # 注意：这里保持原有的 view/flip 逻辑
+        input_board_gpu = input_board.view(batch_count, 20, 10).flip(1).unsqueeze(1)
 
-        with torch.inference_mode():
-            with torch.amp.autocast('cuda' if 'cuda' in self.device else 'cpu'):
-                logits_tensor, values_tensor = self.model(input_board, input_ctx)
+        with inference_mode():
+             # 如果你的环境必须不用 autocast，这里去掉
+            with amp.autocast('cuda' if 'cuda' in self.device else 'cpu'):
+                logits_tensor, values_tensor = self.model(input_board_gpu, input_ctx)
         
         logits_np = logits_tensor.float().cpu().numpy()
         values_np = values_tensor.float().cpu().numpy()
 
+        # 3. [新增] 计算启发式分数
+        # 直接利用已经在 CPU 内存中的 cpu_board_buffer，避免额外的 GPU->CPU 拷贝
+        # cpu_board_buffer 是 (Batch, 200) 的 flat array，我们需要 reshape
+        cpu_boards = self.cpu_board_buffer[:batch_count].numpy().reshape(batch_count, 20, 10)
+        
+        # 启发式权重 (Alpha): 
+        # 初期设为 1.0 (全信规则)，随着模型变强可以调低，或者保持 0.5 混合
+        # 为了解决你的"冷启动"问题，建议直接给很高，比如 0.8 或 1.0
+        # 这里的 value 范围需要归一化到 [-1, 1] 之间以便和 tanh 的输出匹配
+        
         for i in range(batch_count):
             node = leaf_nodes[i]
             moves, ids = self._get_legal_moves_fast(leaf_ptrs[i])
@@ -134,7 +155,18 @@ class MCTS:
             
             raw_logits = logits_np[i][ids]
             _fast_softmax_normalize(raw_logits, node.stats[:, 2])
-            node.temp_value = values_np[i].item()
+            
+            # --- [修复核心] 混合启发式评分 ---
+            nn_val = values_np[i].item()
+            
+
+            # 解包所有返回值，最后一个是计算好的 h_val
+            max_h, holes, bumpiness, agg_height, h_val = _fast_heuristics(cpu_boards[i])
+            
+            # 直接使用 ai/reward.py 算出来的 h_val
+            node.temp_value = (config.MCTS_VAL_WEIGHT_NN * nn_val + 
+                               config.MCTS_VAL_WEIGHT_HEURISTIC * h_val)
+            
             node.is_expanded = True
 
     def run(self, game_state):
@@ -148,10 +180,10 @@ class MCTS:
             return root
 
         board, ctx = game_state.get_state()
-        t_b = torch.tensor(board[None, None, ...].copy(), dtype=torch.float32, device=self.device)
-        t_c = torch.tensor(ctx[None, ...], dtype=torch.float32, device=self.device)
+        t_b = tensor(board[None, None, ...].copy(), dtype=float32, device=self.device)
+        t_c = tensor(ctx[None, ...], dtype=float32, device=self.device)
         
-        with torch.inference_mode(), torch.amp.autocast('cuda' if 'cuda' in self.device else 'cpu'):
+        with inference_mode(), amp.autocast('cuda' if 'cuda' in self.device else 'cpu'):
             logits, _ = self.model(t_b, t_c)
         
         full_logits = logits[0].float().cpu().numpy()
@@ -238,6 +270,19 @@ class MCTS:
             del ptrs_to_free[:]
             sim_count += current_batch_size
 
+        if config.DEBUG_MODE and random.random() < 1.0 / config.DEBUG_FREQ:  # 随机采样验证
+            parent_visits = root.stats[:, 0].sum()
+            best_idx = root.get_best_action(parent_visits, self.c_puct)
+            move = root.legal_moves[best_idx]
+            x, y, rot, _, hold = move  # 解包动作
+            
+            valid, prev_b, post_b, res = game_state.validate_step(x, y, rot, hold)
+            if not valid:
+                print(f"[DEBUG] Inconsistent placement! Action: {move}, Result: {res}")
+                # 可选：保存板面为npz文件调试
+                np.savez("debug_inconsistent.npz", prev=prev_b, post=post_b)
+            else:
+                print(f"[DEBUG] Placement consistent for action {move}")
         return root
 
     def _backpropagate(self, path, value, virtual_loss):

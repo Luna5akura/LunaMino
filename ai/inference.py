@@ -1,16 +1,16 @@
 # ai/inference.py
 
-import torch
+from torch import inference_mode
+from torch import as_tensor
+from torch import from_numpy
+from torch import zeros
+from torch import uint8
+from torch import float32
 import numpy as np
 import time
 import os
 from multiprocessing import shared_memory
 from . import config
-
-# 状态标志
-FLAG_IDLE = 0
-FLAG_REQ_READY = 1
-FLAG_RES_READY = 2
 
 class InferenceBatcher:
     """
@@ -21,34 +21,32 @@ class InferenceBatcher:
     3. Server 扫描所有 Slot，将状态为 REQ_READY 的打包送入 GPU，
        算完后写回并标记为 RES_READY。
     """
-    def __init__(self, num_workers, action_dim=config.ACTION_DIM):
+    def __init__(self, num_workers, local_batch_size=config.MCTS_BATCH_SIZE, action_dim=config.ACTION_DIM):
         self.num_workers = num_workers
+        self.local_batch_size = local_batch_size # 新增维度
         self.action_dim = action_dim
         
-        # 预计算各部分的大小 (Bytes)
-        # Board: [N, 20, 10] (int8)
-        self.size_board = num_workers * 200 
-        # Ctx: [N, 11] (float32 -> 4 bytes)
-        self.size_ctx = num_workers * 11 * 4
-        # Logits: [N, 2304] (float16 -> 2 bytes, 节省带宽)
-        self.size_logits = num_workers * action_dim * 2
-        # Value: [N, 1] (float32 -> 4 bytes)
-        self.size_value = num_workers * 1 * 4
-        # Flags: [N] (uint8)
-        self.size_flags = num_workers * 1
+        # 计算大小：现在每个 Worker 拥有 local_batch_size 个槽位
+        # Shape 变为: [num_workers, local_batch_size, ...]
+        total_slots = num_workers * local_batch_size
+        
+        self.size_board = total_slots * 200 
+        self.size_ctx = total_slots * 11 * 4
+        self.size_logits = total_slots * action_dim * 2
+        self.size_value = total_slots * 1 * 4
+        # Flag 依然是每个 Worker 一个，因为是一次性提交一批
+        self.size_flags = num_workers * 1 
         
         self.total_size = (self.size_board + self.size_ctx + 
                            self.size_logits + self.size_value + self.size_flags)
         
-        # 计算偏移量
+        # ... (Offset 计算逻辑不变，只是 base size 变大了) ...
         self.offset_board = 0
         self.offset_ctx = self.offset_board + self.size_board
         self.offset_logits = self.offset_ctx + self.size_ctx
         self.offset_value = self.offset_logits + self.size_logits
         self.offset_flags = self.offset_value + self.size_value
 
-        # 创建共享内存
-        # 注意：在主进程创建，Worker 连接
         self.shm = None
         self.shm_name = None
         
@@ -66,7 +64,7 @@ class InferenceBatcher:
             self.shm_name = self.shm.name
             self._init_arrays()
             # 初始化 flag 为 0
-            self.np_flags[:] = FLAG_IDLE
+            self.np_flags[:] = config.FLAG_IDLE
             print(f"[InferenceBatcher] Shared Memory created: {self.shm_name} ({self.total_size/1024/1024:.2f} MB)")
             return self.shm_name
         except FileExistsError:
@@ -93,15 +91,16 @@ class InferenceBatcher:
                 pass
 
     def _init_arrays(self):
-        """基于 Buffer 创建 Numpy 视图 (Zero-Copy)"""
         buf = self.shm.buf
+        N = self.num_workers
+        B = self.local_batch_size
         
-        self.np_boards = np.ndarray((self.num_workers, 20, 10), dtype=np.int8, buffer=buf, offset=self.offset_board)
-        self.np_ctxs = np.ndarray((self.num_workers, 11), dtype=np.float32, buffer=buf, offset=self.offset_ctx)
-        # Logits 使用 float16 传输，减少带宽压力
-        self.np_logits = np.ndarray((self.num_workers, self.action_dim), dtype=np.float16, buffer=buf, offset=self.offset_logits)
-        self.np_values = np.ndarray((self.num_workers, 1), dtype=np.float32, buffer=buf, offset=self.offset_value)
-        self.np_flags = np.ndarray((self.num_workers,), dtype=np.uint8, buffer=buf, offset=self.offset_flags)
+        # 增加维度 B
+        self.np_boards = np.ndarray((N, B, 20, 10), dtype=np.int8, buffer=buf, offset=self.offset_board)
+        self.np_ctxs = np.ndarray((N, B, 11), dtype=np.float32, buffer=buf, offset=self.offset_ctx)
+        self.np_logits = np.ndarray((N, B, self.action_dim), dtype=np.float16, buffer=buf, offset=self.offset_logits)
+        self.np_values = np.ndarray((N, B, 1), dtype=np.float32, buffer=buf, offset=self.offset_value)
+        self.np_flags = np.ndarray((N,), dtype=np.uint8, buffer=buf, offset=self.offset_flags)
 
 # =========================================================================
 # Client Side: 伪装成 Model，供 MCTS 调用
@@ -113,42 +112,43 @@ class RemoteModel:
         
     def __call__(self, board_tensor, ctx_tensor):
         """
-        模拟 torch.nn.Module 的调用接口。
-        输入是 Tensor，但我们需要转 numpy 写入共享内存。
+        board_tensor: [B, 1, 20, 10]
+        ctx_tensor:   [B, 11]
         """
-        # 1. Tensor -> Numpy (假设输入是 CPU tensor)
-        # board_tensor: [1, 1, 20, 10], ctx_tensor: [1, 11]
-        # squeeze 掉 batch 维度
-        b_np = board_tensor[0, 0].numpy() # int8 or uint8
-        c_np = ctx_tensor[0].numpy()
+        # 1. 检查 Batch Size 是否匹配
+        batch_size = board_tensor.shape[0]
+        # 如果 MCTS 在收尾阶段产生的小 batch，需要 pad 或者只填部分
+        # 为简化逻辑，我们假设 MCTS 总是填满，或者是最大容量
+        # 实际代码中，MCTS 的 batch_size 可能小于 max capacity，这里做个切片处理
         
-        # 2. 写入共享内存 (Zero-copy write)
-        self.batcher.np_boards[self.idx] = b_np
-        self.batcher.np_ctxs[self.idx] = c_np
+        # Tensor -> Numpy (CPU)
+        b_np = board_tensor.squeeze(1).numpy() # [B, 20, 10]
+        c_np = ctx_tensor.numpy()              # [B, 11]
         
-        # 3. 设置标志位：告诉 Server 我准备好了
-        self.batcher.np_flags[self.idx] = FLAG_REQ_READY
+        # 2. 批量写入共享内存
+        # 注意：这里我们写入 worker 对应的整个槽位
+        # 如果 batch_size < self.batcher.local_batch_size，只写前部分
+        self.batcher.np_boards[self.idx, :batch_size] = b_np
+        self.batcher.np_ctxs[self.idx, :batch_size] = c_np
         
-        # 4. 自旋等待 (Spin-wait)
-        # 对于 MCTS 这种高频低延迟场景，sleep 开销太大，自旋虽然占 CPU 但延迟最低
-        # 为防止死锁，加个简单的 timeout 保护（虽然理论上不需要）
-        # 在 Python 中纯 pass 循环会抢占 GIL，适当加极其微小的 sleep 甚至更好
-        while self.batcher.np_flags[self.idx] != FLAG_RES_READY:
-             # time.sleep(0.000001) # 微秒级 sleep，让出 GIL 
+        # 3. 设置标志位
+        self.batcher.np_flags[self.idx] = config.FLAG_REQ_READY
+        
+        # 4. 自旋等待
+        while self.batcher.np_flags[self.idx] != config.FLAG_RES_READY:
+             time.sleep(0.0001) # 极短 sleep 降低 CPU 占用
              pass
         
         # 5. 读取结果
-        # 拷贝出来，因为共享内存马上要被覆写
-        logits = self.batcher.np_logits[self.idx].astype(np.float32)
-        value = self.batcher.np_values[self.idx] # float32
+        logits = self.batcher.np_logits[self.idx, :batch_size].astype(np.float32)
+        value = self.batcher.np_values[self.idx, :batch_size]
         
-        # 6. 重置标志位
-        self.batcher.np_flags[self.idx] = FLAG_IDLE
+        # 6. 重置标志
+        self.batcher.np_flags[self.idx] = config.FLAG_IDLE
         
-        # 7. 转回 Tensor 格式返回给 MCTS
-        # MCTS 期望: logits [1, 2304], values [1, 1]
-        t_logits = torch.from_numpy(logits).unsqueeze(0)
-        t_values = torch.from_numpy(value).unsqueeze(0)
+        # 7. 转回 Tensor
+        t_logits = from_numpy(logits) # [B, 2304]
+        t_values = from_numpy(value)  # [B, 1]
         
         return t_logits, t_values
 
@@ -159,58 +159,67 @@ class RemoteModel:
 # Server Side: 跑在主进程或独立线程
 # =========================================================================
 def run_inference_loop(batcher: InferenceBatcher, model, device, stop_event):
-    """
-    独立线程函数：不断扫描共享内存，批量推理
-    """
-    print("[Inference Server] Started.")
+    print("[Inference Server] Started with Parallel Batch Support.")
     
-    # 预分配 GPU 缓冲区 (Pinned Memory)
-    # 这样从共享内存 copy 到 Tensor 会更快
-    pin_boards = torch.zeros((batcher.num_workers, 1, 20, 10), dtype=torch.uint8).pin_memory()
-    pin_ctxs = torch.zeros((batcher.num_workers, 11), dtype=torch.float32).pin_memory()
+    # 预分配 pinned memory，注意维度变化
+    # 总容量 = N * B
+    total_capacity = batcher.num_workers * batcher.local_batch_size
+    
+    # 我们用 Flat 的缓冲区来接收数据，方便一次性送入模型
+    pin_boards = zeros((total_capacity, 1, 20, 10), dtype=uint8).pin_memory()
+    pin_ctxs = zeros((total_capacity, 11), dtype=float32).pin_memory()
     
     while not stop_event.is_set():
-        # 1. 扫描标志位 (numpy bool indexing 很快)
-        # 找到所有状态为 REQ_READY (1) 的 worker 索引
-        ready_mask = (batcher.np_flags == FLAG_REQ_READY)
+        # 1. 扫描 Ready 的 Worker
+        ready_mask = (batcher.np_flags == config.FLAG_REQ_READY)
         indices = np.where(ready_mask)[0]
         
-        if len(indices) == 0:
-            # 没有请求，稍微睡一下避免烧 CPU
-            time.sleep(0.0001) 
+        num_ready = len(indices)
+        if num_ready == 0:
+            time.sleep(0.0001)
             continue
-            
+        
+        # *优化*: 动态批处理等待
+        # 如果 Ready 的只有 1 个且总数很多，稍微等一下让 Batch 变大（可选）
+        if num_ready < batcher.num_workers * 0.5:
+             # 极短的忙等，尝试凑单，可能会增加延迟但吞吐量大增
+             for _ in range(1000): 
+                 if np.sum(batcher.np_flags == config.FLAG_REQ_READY) > num_ready: break
+             # 重新获取 indices
+             ready_mask = (batcher.np_flags == config.FLAG_REQ_READY)
+             indices = np.where(ready_mask)[0]
+        
         # 2. 收集数据 (Batching)
-        # 直接从共享内存切片读取
-        batch_boards = torch.as_tensor(batcher.np_boards[indices]) # int8
-        batch_ctxs = torch.as_tensor(batcher.np_ctxs[indices])
+        # 这里的难点是把 [K, B, ...] 变成 [K*B, ...]
+        # 直接利用 numpy 的高级索引
+        
+        # raw_boards: [K, B, 20, 10]
+        raw_boards = batcher.np_boards[indices] 
+        raw_ctxs = batcher.np_ctxs[indices]
+        
+        # Flatten: [K*B, 20, 10]
+        flat_boards = raw_boards.reshape(-1, 20, 10)
+        flat_ctxs = raw_ctxs.reshape(-1, 11)
         
         # 3. 数据上 GPU
-        # 注意：这里我们做了一个 copy 到 pinned memory，然后再 to(device)
-        # 对于小 batch，直接 to(device) 可能也够快，视情况而定
+        t_boards = as_tensor(flat_boards).unsqueeze(1).to(device, non_blocking=True).float()
+        t_ctxs = as_tensor(flat_ctxs).to(device, non_blocking=True)
         
-        # 调整形状 [B, 20, 10] -> [B, 1, 20, 10]
-        current_b = batch_boards.unsqueeze(1).to(device, non_blocking=True).float()
-        current_c = batch_ctxs.to(device, non_blocking=True)
+        # 4. 推理
+        with inference_mode():
+             # 如果你的环境必须不用 autocast，这里去掉
+             logits, values = model(t_boards, t_ctxs)
         
-        # 4. 模型推理
-        # 强制 float32 以兼容 NixOS 环境
-        with torch.inference_mode():
-            logits, values = model(current_b, current_c)
-            
-        # 5. 写回结果
-        # Tensor(GPU) -> Numpy(CPU Shared Memory)
-        # logits: [B, 2304], values: [B, 1]
-        
-        # 转回 float16 写入共享内存
+        # 5. 写回
+        # Logits: [K*B, ActDim] -> Reshape -> [K, B, ActDim]
         out_logits = logits.cpu().numpy().astype(np.float16)
         out_values = values.cpu().numpy()
+        
+        out_logits = out_logits.reshape(len(indices), batcher.local_batch_size, -1)
+        out_values = out_values.reshape(len(indices), batcher.local_batch_size, -1)
         
         batcher.np_logits[indices] = out_logits
         batcher.np_values[indices] = out_values
         
-        # 6. 通知 Workers
-        batcher.np_flags[indices] = FLAG_RES_READY
-        
-        # 统计 (可选)
-        # print(f"Batched {len(indices)} reqs")
+        # 6. 通知
+        batcher.np_flags[indices] = config.FLAG_RES_READY

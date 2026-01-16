@@ -1,6 +1,7 @@
 # ai/utils.py
 import ctypes
 import os
+from . import config
 import numpy as np
 import platform
 from collections import namedtuple
@@ -181,15 +182,11 @@ class TetrisGame:
         # matrix[:, 6:8] 取出了 id 的字节，然后 .view(np.int16) 将其解释为 short
         # 注意：返回形状会变成 (N, 1)，需要 reshape 扁平化
         ids = matrix[:, 6:8].view(np.int16).reshape(-1)
+
+        if config.DEBUG_MODE:
+            print(f"[DEBUG] Legal moves: {moves}")
+            print(f"[DEBUG] Legal ids: {ids}")
         
-        return moves, ids
-        
-        raw_moves = np.frombuffer(self._moves_struct.moves, dtype=self._moves_dtype, count=count)
-        moves = np.column_stack((
-            raw_moves['x'], raw_moves['y'], raw_moves['rot'], 
-            raw_moves['land'], raw_moves['hold']
-        ))
-        ids = raw_moves['id'].astype(np.int64)
         return moves, ids
 
     def step(self, x, y, rotation, use_hold):
@@ -208,3 +205,18 @@ class TetrisGame:
         if not self.ptr: return
         if not self._rendered: self.enable_render()
         lib.ai_render(self.ptr)
+
+    def validate_step(self, x, y, rotation, use_hold):
+        if not self.ptr: raise RuntimeError("Game is closed")
+        # 克隆当前状态
+        sim = self.clone()
+        prev_board, _ = sim.get_state()
+        res = sim.step(x, y, rotation, use_hold)
+        post_board, _ = sim.get_state()
+        sim.close()
+        
+        # 简单一致性检查：step后板面应变化，且如果不是game_over，检查是否有新方块放置（e.g., 非空行增加）
+        changed = not np.array_equal(prev_board, post_board)
+        valid = changed and (res[3] == False or res[0] > 0)  # 示例规则：变化且非意外结束
+        
+        return valid, prev_board, post_board, res

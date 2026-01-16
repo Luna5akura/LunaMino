@@ -21,7 +21,8 @@ class TrainingDashboard:
         self.use_rich = use_rich and HAS_RICH
         self.stats = {
             'game_idx': 0, 'score': 0.0, 'lines': 0, 'steps': 0,
-            'loss': 0.0, 'buffer_size': 0, 'mode': 'Init',
+            'loss': 0.0, 'loss_p': 0.0, 'loss_v': 0.0, 'lr': 0.0, # 新增
+            'buffer_size': 0, 'mode': 'Init',
             'recent_scores': deque(maxlen=20), 'best_score': 0.0
         }
         self.logs = deque(maxlen=8)
@@ -71,7 +72,9 @@ class TrainingDashboard:
 
     def print_plain(self):
         s = self.stats
-        print(f"Game {s['game_idx']} | Score {s['score']:.1f} | Loss {s['loss']:.4f} | Buf {s['buffer_size']}")
+        # 修改如下：加入了 Lines 显示
+        print(f"G {s['game_idx']} | Sc {s['score']:.1f} | Ln {s['lines']} | Stp {s['steps']} | "
+              f"L {s['loss']:.3f} (P {s['loss_p']:.3f}/V {s['loss_v']:.3f}) | Buf {s['buffer_size']}")
 
     def get_context(self):
         if self.use_rich: return Live(self.get_renderable(), refresh_per_second=4, console=self.console)
