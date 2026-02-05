@@ -1,7 +1,7 @@
 # ai/utils.py
+
 import ctypes
 import os
-from . import config
 import numpy as np
 import platform
 from collections import namedtuple
@@ -182,11 +182,7 @@ class TetrisGame:
         # matrix[:, 6:8] 取出了 id 的字节，然后 .view(np.int16) 将其解释为 short
         # 注意：返回形状会变成 (N, 1)，需要 reshape 扁平化
         ids = matrix[:, 6:8].view(np.int16).reshape(-1)
-
-        if config.DEBUG_MODE:
-            print(f"[DEBUG] Legal moves: {moves}")
-            print(f"[DEBUG] Legal ids: {ids}")
-        
+       
         return moves, ids
 
     def step(self, x, y, rotation, use_hold):
