@@ -88,7 +88,12 @@ lib.ai_get_state.argtypes = [
     ctypes.POINTER(ctypes.c_ubyte),
     ctypes.POINTER(ctypes.c_float)
 ]
-lib.ai_get_legal_moves.argtypes = [ctypes.c_void_p, ctypes.POINTER(LegalMoves)]
+lib.ai_get_legal_moves_and_previews.argtypes = [
+    ctypes.c_void_p, 
+    ctypes.POINTER(LegalMoves),
+    ctypes.POINTER(ctypes.c_ubyte) # 传入 buffer 指针
+]
+
 lib.ai_step.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_int]
 lib.ai_step.restype = StepResultStruct
 lib.ai_receive_garbage.argtypes = [ctypes.c_void_p, ctypes.c_int]
@@ -162,28 +167,34 @@ class TetrisGame:
 
         return self._np_board_view[::-1].copy(), self._np_ctx_view.copy()
         
-    def get_legal_moves(self):
+    def get_legal_moves_with_previews(self):
         if not self.ptr: raise RuntimeError("Game is closed")
-        lib.ai_get_legal_moves(self.ptr, ctypes.byref(self._moves_struct))
+        
+        # 准备 buffer: 256个动作 * 200字节
+        preview_buf = np.zeros(MAX_LEGAL_MOVES * 200, dtype=np.uint8)
+        preview_ptr = preview_buf.ctypes.data_as(ctypes.POINTER(ctypes.c_ubyte))
+        
+        # 调用 C 函数
+        lib.ai_get_legal_moves_and_previews(self.ptr, ctypes.byref(self._moves_struct), preview_ptr)
+        
         count = self._moves_struct.count
         if count == 0:
-            return np.empty((0, 5), dtype=np.int8), np.empty((0,), dtype=np.int64)
-                # 1. 获取原始字节视图 (int8)
-        raw_bytes = np.frombuffer(self._moves_struct.moves, dtype=np.int8, count=count * 8)
+            return np.empty((0, 5), dtype=np.int8), np.empty((0, 20, 10), dtype=np.uint8), np.empty((0,), dtype=np.int64)
         
-        # 2. 重塑为 (N, 8) 矩阵
-        matrix = raw_bytes.reshape(count, 8)
+        # 1. 解析 Moves（使用更安全的 ctypes.string_at）
+        move_size = ctypes.sizeof(MacroAction)
+        buf = ctypes.string_at(ctypes.addressof(self._moves_struct.moves), count * move_size)
+        raw_bytes = np.frombuffer(buf, dtype=np.int8).reshape(count, 8)
+        moves = raw_bytes[:, :5].copy()  # x, y, rot, land, hold
+        ids = raw_bytes[:, 6:8].view(np.int16).astype(np.int64).reshape(-1).copy()  # IDs as int64
         
-        # 3. 切片获取前5列 (x, y, rot, land, hold)。这是一个视图，不消耗内存拷贝。
-        moves = matrix[:, :5]
+        # 2. 解析 Previews
+        # C端生成的数据是 flattened 20x10 (y=0..19).
+        # Python端 board 通常是 y倒序显示的 ([::-1])，为了让 CNN 看到的图像上下正确，我们需要翻转 Y 轴
+        raw_previews = preview_buf[:count*200].reshape(count, 20, 10)
+        previews = raw_previews[:, ::-1, :].copy()  # (N, 20, 10)
         
-        # 4. 获取 id。id 在偏移量 6 的位置，长度 2 字节。
-        # 我们可以通过视图转换来获取。
-        # matrix[:, 6:8] 取出了 id 的字节，然后 .view(np.int16) 将其解释为 short
-        # 注意：返回形状会变成 (N, 1)，需要 reshape 扁平化
-        ids = matrix[:, 6:8].view(np.int16).reshape(-1)
-       
-        return moves, ids
+        return moves, previews, ids
 
     def step(self, x, y, rotation, use_hold):
         # 使用缓存的函数引用
