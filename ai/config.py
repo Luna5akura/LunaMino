@@ -20,14 +20,14 @@ EMBED_DIM = 64
 # Training hyperparameters
 GAMMA = 0.99 # Discount factor
 EPSILON_START = 1.0
-EPSILON_END = 0.05
-EPSILON_DECAY = 0.9999
+EPSILON_END = 0.01
+EPSILON_DECAY = 0.9996
 BUFFER_SIZE = 100000
 BATCH_SIZE = 64
 LR = 0.001
 TARGET_UPDATE_FREQ = 1000 # Steps between target network updates
 MAX_EPISODES = 10000
-MAX_STEPS_PER_EPISODE = 1000 # Prevent infinite games
+MAX_STEPS_PER_EPISODE = 50000
 # Reward shaping coefficients
 REWARD_LINES = 100.0 # Bonus per line cleared
 REWARD_HEIGHT = -0.05 # Penalty per unit increase in aggregate height

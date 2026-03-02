@@ -5,6 +5,9 @@ import time
 import numpy as np
 import torch
 from concurrent.futures import ThreadPoolExecutor
+
+torch.set_num_threads(1) 
+
 from .agent import DQNAgent
 from .model import QNet
 from .config import *
@@ -36,7 +39,7 @@ def run_episode(seed, agent_params):
             idx = np.random.randint(len(moves))
         else:
             with torch.no_grad():
-                post_ctxs = [DQNAgent.approximate_post_ctx(prev_ctx, moves[i], previews[i]) for i in range(len(previews))]
+                post_ctxs = [DQNAgent.approximate_post_ctx(prev_ctx, moves[i], previews[i], prev_board) for i in range(len(previews))]
                 post_ctx_t = torch.tensor(np.stack(post_ctxs), dtype=torch.float32)
                 boards_t = torch.tensor(previews, dtype=torch.float32)
                 q_values = local_q_net(boards_t, post_ctx_t).squeeze()
@@ -52,7 +55,7 @@ def run_episode(seed, agent_params):
         post_board, post_ctx = game.get_state()
         done = step_res[3]
         total_lines += step_res[0]
-        reward = DQNAgent.compute_reward(None, step_res, prev_board, post_board, land)  # Use static if moved, or instance None
+        reward = DQNAgent.compute_reward(step_res, prev_board, post_board, land)  # Use static if moved, or instance None
         next_moves = np.empty((0, 5), dtype=np.int8)
         next_previews = np.empty((0, 20, 10), dtype=np.uint8)
         if not done:
@@ -79,7 +82,9 @@ def train():
         with ThreadPoolExecutor(max_workers=NUM_THREADS) as executor:
             batch_size = min(NUM_THREADS, MAX_EPISODES - episode)
             seeds = [(episode + i + int(time.time())) % 10000 for i in range(batch_size)]
-            agent_params = {'epsilon': agent.epsilon, 'q_net': agent.q_net.state_dict()}
+
+            cpu_state_dict = {k: v.cpu() for k, v in agent.q_net.state_dict().items()}
+            agent_params = {'epsilon': agent.epsilon, 'q_net': cpu_state_dict}
             futures = [executor.submit(run_episode, seed, agent_params) for seed in seeds]
 
             for future in futures:

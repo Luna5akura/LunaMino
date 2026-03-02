@@ -22,7 +22,7 @@ class QNet(nn.Module):
             x = F.max_pool2d(x, 2)
             cnn_out_size = x.view(1, -1).size(1)
             
-        print(f"Model Debug: CNN Output Size {cnn_out_size}")
+        # print(f"Model Debug: CNN Output Size {cnn_out_size}")
 
         # 2. Context
         self.ctx_fc = nn.Linear(CTX_DIM, EMBED_DIM)

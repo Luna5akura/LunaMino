@@ -181,12 +181,18 @@ class TetrisGame:
         if count == 0:
             return np.empty((0, 5), dtype=np.int8), np.empty((0, 20, 10), dtype=np.uint8), np.empty((0,), dtype=np.int64)
         
-        # 1. 解析 Moves（使用更安全的 ctypes.string_at）
+
+        # 1. 使用预定义的 _moves_dtype 解析 Moves
         move_size = ctypes.sizeof(MacroAction)
         buf = ctypes.string_at(ctypes.addressof(self._moves_struct.moves), count * move_size)
-        raw_bytes = np.frombuffer(buf, dtype=np.int8).reshape(count, 8)
-        moves = raw_bytes[:, :5].copy()  # x, y, rot, land, hold
-        ids = raw_bytes[:, 6:8].view(np.int16).astype(np.int64).reshape(-1).copy()  # IDs as int64
+        parsed = np.frombuffer(buf, dtype=self._moves_dtype)
+
+        # 构建 (N, 5) 数组
+        moves = np.column_stack((
+            parsed['x'], parsed['y'], parsed['rot'], 
+            parsed['land'], parsed['hold']
+        ))
+        ids = parsed['id'].astype(np.int64)
         
         # 2. 解析 Previews
         # C端生成的数据是 flattened 20x10 (y=0..19).
