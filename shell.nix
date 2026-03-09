@@ -46,5 +46,18 @@ in pkgs.mkShell {
 
     echo "Environment ready. To install GPU-enabled Torch, run:"
     echo "pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu128"
+
+    VENV="./.venv"
+    if [ ! -d $VENV ]; then
+      echo "Creating virtual environment..."
+      virtualenv $VENV
+    fi
+    source $VENV/bin/activate
+
+    # 🤖 自动给 Triton 打 NixOS 专属补丁！
+    TRITON_DRIVER="$VENV/lib/python3.11/site-packages/triton/backends/nvidia/driver.py"
+    if [ -f "$TRITON_DRIVER" ]; then
+      sed -i 's|\["/sbin/ldconfig", "-p"\]|["echo", "libcuda.so (libc6,x86-64) => /run/opengl-driver/lib/libcuda.so"]|g' "$TRITON_DRIVER"
+    fi
   '';
 }

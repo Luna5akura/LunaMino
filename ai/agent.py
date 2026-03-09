@@ -1,6 +1,7 @@
 # ai/agent.py
 
 import torch
+torch.set_float32_matmul_precision('high')  # 开启 RTX 30 系列 Tensor Core 加速
 import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
@@ -15,6 +16,7 @@ from .config import *
 class ReplayBuffer:
     def __init__(self, capacity):
         self.buffer = deque(maxlen=capacity)
+
 
     def push(self, chosen_preview, ctx, reward, next_moves, next_previews, next_ctx, done):
         self.buffer.append((chosen_preview, ctx, reward, next_moves, next_previews, next_ctx, done))
@@ -51,7 +53,7 @@ class DQNAgent:
         self.target_net.load_state_dict(self.q_net.state_dict())
         
         # 注意：优化器必须在模型推到 GPU 之后再初始化！
-        self.optimizer = optim.Adam(self.q_net.parameters(), lr=0.0001)
+        self.optimizer = optim.Adam(self.q_net.parameters(), lr=0.0001, fused=True)
         
         self.replay_buffer = ReplayBuffer(BUFFER_SIZE)
         self.epsilon = EPSILON_START
@@ -143,103 +145,54 @@ class DQNAgent:
                     idx = torch.argmax(q_values).item()
         return legal_moves[idx], previews[idx]
 
-    @staticmethod  # 记得加 @staticmethod，并在参数中去掉 self (见下文第3点)
-    def compute_reward(step_res, prev_board, post_board, landing_height):
-        lines_cleared, _, _, is_game_over, _, _ = step_res
-        reward = REWARD_LINES * lines_cleared
-        if is_game_over:
-            reward += REWARD_GAME_OVER
-
-        def get_holes(board):
-            holes = 0
-            for col in range(BOARD_WIDTH):
-                col_data = board[:, col]
-                first_occupied = np.where(col_data > 0)[0]
-                if len(first_occupied) > 0:
-                    holes += np.sum(col_data[first_occupied[0]:] == 0)
-            return holes
-
-
-        def get_height_and_bumpiness(board):
-            heights = []
-            for col in range(BOARD_WIDTH):
-                col_data = board[:, col]
-                first_occupied = np.where(col_data > 0)[0]
-                if len(first_occupied) > 0:
-                    heights.append(BOARD_HEIGHT - first_occupied[0])
-                else:
-                    heights.append(0)
-            agg_height = sum(heights)
-            bumpiness = sum(abs(heights[i] - heights[i+1]) for i in range(BOARD_WIDTH - 1))
-            return agg_height, bumpiness
-
-        prev_holes = get_holes(prev_board)
-        post_holes = get_holes(post_board)
-        prev_h, prev_bump = get_height_and_bumpiness(prev_board)
-        post_h, post_bump = get_height_and_bumpiness(post_board)
-
-        reward += REWARD_HOLES * (post_holes - prev_holes)
-        reward += REWARD_HEIGHT * (post_h - prev_h)
-        reward += REWARD_BUMPINESS * (post_bump - prev_bump)  # 新增
-        reward += REWARD_LANDING * landing_height             # 新增
-
-        return reward
-
     def optimize(self):
         if len(self.replay_buffer) < BATCH_SIZE:
             return 0.0
+        
         batch = self.replay_buffer.sample(BATCH_SIZE)
 
-        # 【重点修复】：将当前状态的 Tensors 送入 GPU
-        curr_boards = torch.tensor(np.stack([b[0] for b in batch]), dtype=torch.float32).to(self.device)
-        curr_ctxs = torch.tensor(np.stack([b[1] for b in batch]), dtype=torch.float32).to(self.device)
-        rewards = torch.tensor([b[2] for b in batch], dtype=torch.float32).to(self.device)
-        dones = torch.tensor([b[6] for b in batch], dtype=torch.float32).to(self.device)
+        curr_boards_np = np.stack([b[0] for b in batch])
+        curr_ctxs_np = np.stack([b[1] for b in batch])
+        rewards_np = np.array([b[2] for b in batch], dtype=np.float32)
+        dones_np = np.array([b[6] for b in batch], dtype=np.float32)
 
-        current_q = self.q_net(curr_boards, curr_ctxs).squeeze()
+        curr_boards = torch.as_tensor(curr_boards_np, dtype=torch.float32).pin_memory().to(self.device, non_blocking=True)
+        curr_ctxs = torch.as_tensor(curr_ctxs_np, dtype=torch.float32).pin_memory().to(self.device, non_blocking=True)
+        rewards = torch.as_tensor(rewards_np, dtype=torch.float32).pin_memory().to(self.device, non_blocking=True)
+        # 用 bool 类型的掩码张量，方便后续做索引
+        dones_t = torch.as_tensor(dones_np, dtype=torch.bool).to(self.device, non_blocking=True)
+
+        # 【新增】：开启自动混合精度 (bfloat16)
+        with torch.autocast(device_type='cuda', dtype=torch.bfloat16):
+            current_q = self.q_net(curr_boards, curr_ctxs).squeeze(-1)
 
         with torch.no_grad():
             target_q = rewards.clone()
-            valid_indices =[i for i in range(BATCH_SIZE) if not batch[i][6]]
-            if valid_indices:
-                all_next_boards =[]
-                all_next_ctxs = []
-                split_sizes =[]
-                for i in valid_indices:
-                    next_moves = batch[i][3]
-                    next_previews = batch[i][4]
-                    next_prev_ctx = batch[i][5]
-                    count = len(next_previews)
-                    if count > 0:
-                        # 注意这里传入了 batch[i][0] 作为 prev_board，用来正确预测消除行数
-                        post_ctxs =[DQNAgent.approximate_post_ctx(next_prev_ctx, next_moves[j], next_previews[j], batch[i][0]) for j in range(count)]
-                        all_next_boards.append(next_previews)
-                        all_next_ctxs.append(np.stack(post_ctxs))
-                        split_sizes.append(count)
-                    else:
-                        split_sizes.append(0)
-                        
-                if len(all_next_boards) > 0:
-                    # 【重点修复】：将下一步状态的 Tensors 也送入 GPU
-                    big_board_batch = torch.tensor(np.concatenate(all_next_boards), dtype=torch.float32).to(self.device)
-                    big_ctx_batch = torch.tensor(np.concatenate(all_next_ctxs), dtype=torch.float32).to(self.device)
-                    
-                    all_next_q_values = self.target_net(big_board_batch, big_ctx_batch).squeeze()
-                    if all_next_q_values.dim() == 0:
-                        all_next_q_values = all_next_q_values.unsqueeze(0)
-                        
-                    cursor = 0
-                    for idx, count in enumerate(split_sizes):
-                        i = valid_indices[idx]
-                        if count > 0:
-                            sample_qs = all_next_q_values[cursor:cursor + count]
-                            if sample_qs.numel() > 0:
-                                max_q = torch.max(sample_qs)
-                                target_q[i] += GAMMA * max_q
-                            cursor += count
+            
+            # 【终极奥义：无论死没死，全部拼成固定尺寸矩阵，迎合 torch.compile！】
+            # 因为之前在 Worker 中强制填充了 MAX_EVALS=20
+            # 所以这里 next_boards_np 的形状绝对是 (BATCH_SIZE, 20, 20, 10)
+            next_boards_np = np.stack([b[3] for b in batch]) 
+            next_ctxs_np = np.stack([b[4] for b in batch])   
+            
+            # 展平前两个维度，直接生成 (BATCH_SIZE * 20, ...) 的固定矩阵
+            N = BATCH_SIZE * 20
+            next_b_t = torch.as_tensor(next_boards_np.reshape(N, 20, 10), dtype=torch.float32).pin_memory().to(self.device, non_blocking=True)
+            next_c_t = torch.as_tensor(next_ctxs_np.reshape(N, 11), dtype=torch.float32).pin_memory().to(self.device, non_blocking=True)
+            
+            with torch.autocast(device_type='cuda', dtype=torch.bfloat16):
+                next_q_all = self.target_net(next_b_t, next_c_t).squeeze(-1)
+            
+            # 算完之后，还原回 (BATCH_SIZE, 20) 的形状并求当前状态下20个动作的最大Q值
+            next_q_all = next_q_all.view(BATCH_SIZE, 20)
+            max_q, _ = torch.max(next_q_all, dim=1)
+            
+            # 【优雅的掩码】：只给还没死的对局加上 Target Q，不用写任何 for 循环！
+            valid_mask = ~dones_t
+            target_q[valid_mask] += GAMMA * max_q[valid_mask]
 
         loss = F.smooth_l1_loss(current_q, target_q)
-        self.optimizer.zero_grad()
+        self.optimizer.zero_grad(set_to_none=True) 
         loss.backward()
         torch.nn.utils.clip_grad_norm_(self.q_net.parameters(), 1.0)
         self.optimizer.step()
@@ -251,9 +204,10 @@ class DQNAgent:
         return loss.item()
 
     def save_checkpoint(self, filename):
+        # 使用 replace('_orig_mod.', '') 剥离编译前缀，保证保存的是干净的权重
         state = {
-            'q_net': self.q_net.state_dict(),
-            'target_net': self.target_net.state_dict(),
+            'q_net': {k.replace('_orig_mod.', ''): v for k, v in self.q_net.state_dict().items()},
+            'target_net': {k.replace('_orig_mod.', ''): v for k, v in self.target_net.state_dict().items()},
             'optim': self.optimizer.state_dict(),
             'eps': self.epsilon,
             'steps': self.steps,
